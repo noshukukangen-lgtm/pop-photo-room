@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 
 const A = window.APP;
-const { $, photos, renderer } = A;
+const { photos, renderer } = A;
 
 // ---------- VRに入るとき「アンカー」機能も使わせてもらう ----------
 if (navigator.xr && navigator.xr.requestSession){
@@ -110,6 +110,7 @@ A.buildPhotoMesh = d => {
   if (d.saved){
     m.userData.id = d.saved.id;
     m.userData.rel = d.saved.rel;
+    m.userData.pinned = !!d.saved.pinned;
     if (d.saved.rel) new THREE.Matrix4().fromArray(d.saved.rel).decompose(m.position, m.quaternion, m.scale);
     A.setCut(m, !!d.saved.cut);
     m.userData.saveKey = keyOf(m);
@@ -129,32 +130,34 @@ async function saveNew(m){
     mask: await toBlob(maskCv, 'image/png'),
     width: photoCv.width, height: photoCv.height,
     G: u.G, M: u.M, gw: u.gw, gh: u.gh,
-    cut: !!u.cut, rel: relOf(m), time: Date.now(),
+    cut: !!u.cut, pinned: !!u.pinned, rel: relOf(m), time: Date.now(),
   };
   await dbPut(rec);
   u.rel = rec.rel; u.saveKey = keyOf(m);
 }
 
 // ---------- 動かした・消したら保存（2秒ごとに確認） ----------
-function relOf(m){
-  m.updateMatrixWorld(true);
-  return new THREE.Matrix4().multiplyMatrices(MaInv, m.matrixWorld).toArray();
+// こっちを向いて回っている分は保存せず、「置いた向き」（baseQ）で保存する
+function poseOf(m){
+  return new THREE.Matrix4().compose(m.position, m.userData.baseQ || m.quaternion, m.scale);
 }
-const keyOf = m => m.matrixWorld.elements.map(v => v.toFixed(3)).join(',') + (m.userData.cut ? 'c' : '');
+const relOf = m => new THREE.Matrix4().multiplyMatrices(MaInv, poseOf(m)).toArray();
+const keyOf = m => poseOf(m).elements.map(v => v.toFixed(3)).join(',') +
+  (m.userData.cut ? 'c' : '') + (m.userData.pinned ? 'p' : '');
 
+const known = new Set();
 setInterval(async () => {
   if (restoring) return;
   const canSave = !renderer.xr.isPresenting || anchorReady || !localStorage.getItem(ANCHOR_KEY);
   for (const m of photos){
     const u = m.userData;
-    if (!u.id || u.held || m.parent !== A.scene) continue;   // つかんでいる間は保存しない
-    m.updateMatrixWorld(true);
+    if (!u.id || m.parent !== A.scene) continue;   // つかんでいる間は保存しない
     const k = keyOf(m);
     if (!canSave || k === u.saveKey) continue;
     u.saveKey = k;
     const rec = await dbGet(u.id);
     if (!rec) continue;
-    rec.rel = relOf(m); rec.cut = !!u.cut;
+    rec.rel = relOf(m); rec.cut = !!u.cut; rec.pinned = !!u.pinned;
     u.rel = rec.rel;
     await dbPut(rec);
   }
@@ -163,7 +166,6 @@ setInterval(async () => {
   for (const id of known) if (!ids.has(id)){ known.delete(id); dbDel(id); }
   ids.forEach(id => id && known.add(id));
 }, 2000);
-const known = new Set();
 
 // ---------- ページを開いたら、保存してある写真を復元 ----------
 (async () => {
