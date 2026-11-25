@@ -555,7 +555,17 @@ function applyLook(){
 //  ・Colabで作った「〜_pop.png」 → AIを使わず、中のデータをそのまま使う
 //     左半分＝写真、右半分＝ 赤:奥行き上位8bit / 緑:奥行き下位8bit / 青:切り抜き
 // =====================================================================
-const isPopFile = f => /_pop\.png$/i.test(f.name);
+// ファイル名が変わっていても見分けられるように、中身の目印（Colabが書き込む「pop-photo-room」）も確認する
+async function isPopFile(f){
+  if (/_pop\b/i.test(f.name)) return true;   // 「〜_pop.png」「〜_pop (1).png」なども
+  try {
+    const head = new Uint8Array(await f.slice(0, 65536).arrayBuffer());
+    const isPng = head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4E && head[3] === 0x47;
+    return isPng && new TextDecoder('latin1').decode(head).includes('pop-photo-room');
+  } catch (e) {
+    return false;
+  }
+}
 
 async function analyzeWithAI(file, label){
   const url = URL.createObjectURL(file);
@@ -672,7 +682,7 @@ function buildPhotoMesh(d, index){
 }
 
 async function makePopPhoto(file, index, label){
-  const data = isPopFile(file) ? await readPopFile(file, label) : await analyzeWithAI(file, label);
+  const data = (await isPopFile(file)) ? await readPopFile(file, label) : await analyzeWithAI(file, label);
   buildPhotoMesh(data, index);
 }
 
