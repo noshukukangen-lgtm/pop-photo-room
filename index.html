@@ -57,7 +57,8 @@
   <div style="margin-top:8px">
     <label>切り抜きAI
       <select id="cutModel">
-        <option value="birefnet">高精度（BiRefNet）</option>
+        <option value="rmbg">標準（RMBG・おすすめ）</option>
+        <option value="birefnet">高精度（BiRefNet・重い）</option>
         <option value="modnet">軽量（MODNet）</option>
       </select>
     </label>
@@ -123,7 +124,10 @@ const PARAMS = [
   { key:'back',     label:'裏側',            options:['hide','shadow','show'], def:'shadow',
     names:{ hide:'非表示', shadow:'影', show:'表示' } },
 ];
-const STORE_KEY = 'popPhotoSettings.v2';
+const STORE_KEY = 'popPhotoSettings.v3';
+const RUN_KEY = 'popPhotoRunning';   // 切り抜き中に落ちたかどうかの目印
+const CUT_NAMES = { rmbg:'標準（RMBG）', birefnet:'高精度（BiRefNet）', modnet:'軽量（MODNet）' };
+const LIGHTER = { birefnet:'rmbg', rmbg:'modnet', modnet:'modnet' };
 const settings = {};
 for (const p of PARAMS) settings[p.key] = p.def;
 let savedCutModel = null;
@@ -132,7 +136,15 @@ try {
   for (const p of PARAMS) if (s[p.key] !== undefined) settings[p.key] = s[p.key];
   savedCutModel = s.cutModel || null;
 } catch (e) {}
-if (savedCutModel) $('cutModel').value = savedCutModel;
+if (savedCutModel && CUT_NAMES[savedCutModel]) $('cutModel').value = savedCutModel;
+// 前回、切り抜きの途中でブラウザが落ちていたら、ひとつ軽いAIに切り替える
+let crashedKind = null;
+try { crashedKind = localStorage.getItem(RUN_KEY); localStorage.removeItem(RUN_KEY); } catch (e) {}
+if (crashedKind && CUT_NAMES[crashedKind]){
+  const next = LIGHTER[crashedKind];
+  $('cutModel').value = next;
+  setTimeout(() => showErr(`前回「${CUT_NAMES[crashedKind]}」の処理中に止まったようなので、「${CUT_NAMES[next]}」に切り替えました。`), 0);
+}
 function saveSettings(){
   try { localStorage.setItem(STORE_KEY, JSON.stringify({ ...settings, cutModel: $('cutModel').value })); } catch (e) {}
 }
@@ -265,10 +277,21 @@ async function loadCutModel(kind){
     };
     return cutModels.modnet;
   }
+  if (kind === 'rmbg'){
+    status.textContent = '切り抜きAI（標準）を準備中…初回は約45MBのダウンロードがあります';
+    const pipe = await pipeline('background-removal', 'briaai/RMBG-1.4',
+      { dtype:'q8', progress_callback: onDownloadProgress });
+    cutModels.rmbg = {
+      name: '標準（RMBG）',
+      run: async (file, url) => { const r = await pipe(url); return Array.isArray(r) ? r[0] : r; }
+    };
+    return cutModels.rmbg;
+  }
   // 高精度：BiRefNet lite（GPUが使えればGPU、だめならCPU）
+  // CPU（wasm）だと重すぎてブラウザが落ちるので、GPU（WebGPU）が使えるときだけ動かす
   const first = await pickDevice();
+  if (first.device !== 'webgpu') throw new Error('このブラウザではGPU（WebGPU）が使えないため');
   const tries = [first];
-  if (first.device !== 'wasm') tries.push({ device:'wasm', dtype:'fp32' });
   let lastErr;
   for (const t of tries){
     try {
@@ -296,25 +319,28 @@ async function loadCutModel(kind){
   throw lastErr;
 }
 
+const markRunning = kind => { try { kind ? localStorage.setItem(RUN_KEY, kind) : localStorage.removeItem(RUN_KEY); } catch (e) {} };
+
 async function runCutout(file, url){
-  const kind = $('cutModel').value;
-  try {
-    const m = await loadCutModel(kind);
-    status.textContent += `（切り抜き：${m.name}）`;
-    return await m.run(file, url);
-  } catch (e) {
-    if (kind !== 'birefnet') throw e;
-    const msg = e && e.message ? e.message : String(e);
-    // GPUで動かなかったらCPUで1回だけやり直す
-    if (cutModels.birefnet && cutModels.birefnet.device === 'webgpu'){
-      delete cutModels.birefnet; forceWasm = true;
-      try { const m = await loadCutModel('birefnet'); return await m.run(file, url); } catch (e2) {}
+  let kind = $('cutModel').value;
+  for (;;){
+    try {
+      markRunning(kind);
+      const m = await loadCutModel(kind);
+      status.textContent += `（切り抜き：${m.name}）`;
+      const r = await m.run(file, url);
+      markRunning(null);
+      return r;
+    } catch (e) {
+      markRunning(null);
+      const msg = e && e.message ? e.message : String(e);
+      if (kind === 'modnet') throw e;
+      const next = LIGHTER[kind];
+      showErr(`「${CUT_NAMES[kind]}」が使えなかったので「${CUT_NAMES[next]}」に切り替えます：${msg}`);
+      delete cutModels[kind];
+      kind = next;
+      $('cutModel').value = kind; saveSettings();
     }
-    showErr('高精度の切り抜きが使えなかったので、軽量版に切り替えます：' + msg);
-    delete cutModels.birefnet;
-    $('cutModel').value = 'modnet'; saveSettings();
-    const m = await loadCutModel('modnet');
-    return await m.run(file, url);
   }
 }
 
