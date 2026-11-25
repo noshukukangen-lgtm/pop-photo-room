@@ -72,7 +72,7 @@
   </details>
   <div class="help">
     片手トリガー：つかんで移動 ／ 両手トリガー：広げて拡大縮小 ／ つかんでスティック上下：微調整<br>
-    写真に手を近づけると、手の周りだけ写真が透けます（調整パネルで大きさ変更・0で無効）<br>
+    写真に手を近づけると、手から前に伸びる楕円の範囲だけ写真が透けます（調整パネルで太さ・長さを変更、太さ0で無効）<br>
     つかんで A・X：その写真の切り抜き切替 ／ B・Y：全部の切り抜き切替<br>
     <b>スティック押し込み：調整パネル ／ つかんだままスティック押し込み：その写真を削除</b>
   </div>
@@ -121,8 +121,10 @@ const PARAMS = [
     fmt:v => v <= 0 ? 'なし' : Math.round(v*100) + '%' },
   { key:'fade',     label:'斜めで薄く消す',    min:20,   max:90,   step:5,    def:60,
     fmt:v => v >= 90 ? 'なし' : v + '°〜' },
-  { key:'handHole', label:'手の周りを透明に',  min:0,    max:0.3,  step:0.02, def:0.12,
+  { key:'handHole', label:'手の透明・太さ',    min:0,    max:0.3,  step:0.02, def:0.12,
     fmt:v => v <= 0 ? 'なし' : Math.round(v*100) + 'cm' },
+  { key:'handLen',  label:'手の透明・前の長さ', min:0,    max:0.8,  step:0.05, def:0.35,
+    fmt:v => Math.round(v*100) + 'cm' },
   { key:'back',     label:'裏側',            options:['hide','shadow','show'], def:'shadow',
     names:{ hide:'非表示', shadow:'影', show:'表示' } },
 ];
@@ -434,10 +436,18 @@ uniform sampler2D map;
 uniform sampler2D maskMap;
 uniform sampler2D depthMap;
 uniform float uCut, uThresh, uDepthCut, uRef, uOpacity, uShadow;
-uniform vec3 uHand0, uHand1;
-uniform float uHandR;
+uniform vec3 uHand0, uHand1, uHandDir0, uHandDir1;
+uniform float uHandR, uHandLen;
 varying vec2 vUv;
 varying vec3 vWorld;
+// 手から前方へ伸びる楕円体の中で 1 未満になる値
+float handShape(vec3 p, vec3 hand, vec3 dir){
+  float a = max(uHandR, (uHandLen + uHandR) * 0.5);   // 前後方向の半径
+  vec3 v = p - (hand + dir * (a - uHandR));             // 手の少し後ろ〜前方 uHandLen まで
+  float along = dot(v, dir);
+  float perp = length(v - along * dir);
+  return length(vec2(along / a, perp / uHandR));
+}
 void main(){
   if (uOpacity < 0.01) discard;
   vec4 c = texture2D(map, vUv);
@@ -453,9 +463,9 @@ void main(){
   float alpha = (uShadow > 0.5 ? 0.55 : 1.0) * uOpacity;
   // 自分の手（コントローラー）の周りは透明にして、本物の手が見えるようにする
   if (uHandR > 0.001){
-    float d = min(distance(vWorld, uHand0), distance(vWorld, uHand1));
-    if (d < uHandR) discard;
-    alpha *= smoothstep(uHandR, uHandR + 0.04, d);
+    float q = min(handShape(vWorld, uHand0, uHandDir0), handShape(vWorld, uHand1, uHandDir1));
+    if (q < 1.0) discard;
+    alpha *= smoothstep(1.0, 1.0 + 0.04 / uHandR, q);
   }
   gl_FragColor = vec4(col, alpha);
   #include <colorspace_fragment>
@@ -466,7 +476,10 @@ const FAR = new THREE.Vector3(9999, 9999, 9999);
 const handU = {
   uHand0: { value: FAR.clone() },
   uHand1: { value: FAR.clone() },
+  uHandDir0: { value: new THREE.Vector3(0, 0, -1) },
+  uHandDir1: { value: new THREE.Vector3(0, 0, -1) },
   uHandR: { value: settings.handHole },
+  uHandLen: { value: settings.handLen },
 };
 
 function makeMaterial(tex, ref, shadow){
@@ -524,6 +537,7 @@ function applyGeometry(mesh){
 // しきい値・後ろを削る・裏側 を反映
 function applyLook(){
   handU.uHandR.value = settings.handHole;
+  handU.uHandLen.value = settings.handLen;
   for (const m of photos){
     for (const mat of [m.material, m.userData.back.material]){
       mat.uniforms.uThresh.value = settings.thresh;
@@ -838,11 +852,15 @@ function removeAllPhotos(){
 
 // 手・コントローラーの位置（グリップ）
 const grips = [0,1].map(i => { const g = renderer.xr.getControllerGrip(i); scene.add(g); return g; });
+const handQ = new THREE.Quaternion();
 function updateHands(){
   grips.forEach((g, i) => {
     const u = handU['uHand' + i].value;
     if (renderer.xr.isPresenting && g.visible) g.getWorldPosition(u);
     else u.copy(FAR);
+    // 前方向は、コントローラー（手）が指している向き
+    controllers[i].getWorldQuaternion(handQ);
+    handU['uHandDir' + i].value.set(0, 0, -1).applyQuaternion(handQ).normalize();
   });
 }
 
