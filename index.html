@@ -72,7 +72,8 @@
   </details>
   <div class="help">
     片手トリガー：つかんで移動 ／ 両手トリガー：広げて拡大縮小 ／ つかんでスティック上下：微調整<br>
-    つかんで A・X：その写真の切り抜き切替 ／ B・Y：全部の切り抜き切替 ／ <b>スティック押し込み：調整パネル</b>
+    つかんで A・X：その写真の切り抜き切替 ／ B・Y：全部の切り抜き切替<br>
+    <b>スティック押し込み：調整パネル ／ つかんだままスティック押し込み：その写真を削除</b>
   </div>
   <div id="status">読み込み中…</div>
 
@@ -576,6 +577,7 @@ async function makePopPhoto(file, index, label){
   scene.add(mesh);
   photos.push(mesh);
   applyLook();
+  drawPanel();
   URL.revokeObjectURL(url);
 }
 
@@ -612,8 +614,10 @@ const PW = 1024, HEAD = 110, ROWH = 92;
 const panelRows = [
   ...PARAMS.map(p => ({ type: p.options ? 'cycle' : 'num', p })),
   { type:'cutall' },
+  { type:'clear' },
   { type:'footer' },
 ];
+let clearArmed = 0;   // 「全部消す」の確認待ち（押した時刻）
 const PH = HEAD + panelRows.length * ROWH + 24;
 const pc = document.createElement('canvas'); pc.width = PW; pc.height = PH;
 const ptex = new THREE.CanvasTexture(pc); ptex.colorSpace = THREE.SRGBColorSpace;
@@ -642,6 +646,16 @@ function rowButtons(r, i){
       allCut = !allCut; photos.forEach(m => setCut(m, allCut)); drawPanel();
     }},
   ];
+  if (r.type === 'clear'){
+    const armed = performance.now() - clearArmed < 3000;
+    return [
+      { x0:660, x1:1000, y0, y1, text: armed ? 'もう一度で消去' : '全部消す', danger:true, act:() => {
+        if (performance.now() - clearArmed < 3000){ clearArmed = 0; removeAllPhotos(); }
+        else { clearArmed = performance.now(); setTimeout(drawPanel, 3100); }
+        drawPanel();
+      }},
+    ];
+  }
   return [
     { x0:30,  x1:500,  y0, y1, text:'初期値に戻す', act:() => resetParams() },
     { x0:530, x1:1000, y0, y1, text:'閉じる', act:() => { panel.visible = false; } },
@@ -669,12 +683,13 @@ function drawPanel(){
     g.textAlign = 'left'; g.fillStyle = '#eee'; g.font = '38px sans-serif';
     if (r.type === 'num' || r.type === 'cycle') g.fillText(r.p.label, 36, cy);
     if (r.type === 'cutall') g.fillText('切り抜き（全部）', 36, cy);
+    if (r.type === 'clear') g.fillText(`写真（${photos.length} 枚）`, 36, cy);
     if (r.type === 'num'){
       g.textAlign = 'right'; g.fillStyle = '#7cf'; g.font = 'bold 40px sans-serif';
       g.fillText(r.p.fmt(settings[r.p.key]), 640, cy);
     }
     for (const b of rowButtons(r, i)){
-      g.fillStyle = '#2d3a4f'; rr(g, b.x0, b.y0, b.x1-b.x0, b.y1-b.y0, 18); g.fill();
+      g.fillStyle = b.danger ? '#7a2630' : '#2d3a4f'; rr(g, b.x0, b.y0, b.x1-b.x0, b.y1-b.y0, 18); g.fill();
       g.fillStyle = '#fff'; g.textAlign = 'center';
       g.font = (b.text === '+' || b.text === '−') ? 'bold 56px sans-serif' : 'bold 36px sans-serif';
       g.fillText(b.text, (b.x0+b.x1)/2, (b.y0+b.y1)/2 + 2);
@@ -776,6 +791,44 @@ const controllers = [0,1].map(i => {
   return c;
 });
 
+// ===== 写真の削除 =====
+function disposePhoto(m){
+  m.parent && m.parent.remove(m);
+  const mats = [m.material, m.userData.back.material];
+  const texs = new Set();
+  for (const mat of mats){
+    for (const k of ['map','maskMap','depthMap']) texs.add(mat.uniforms[k].value);
+    mat.dispose();
+  }
+  texs.forEach(t => t && t.dispose());
+  m.geometry.dispose();
+  const i = photos.indexOf(m);
+  if (i >= 0) photos.splice(i, 1);
+}
+function releaseAll(){
+  twoHand = null;
+  for (const c of controllers){
+    c.userData.held = null;
+    c.userData.scaler = false;
+    c.userData.lineMat.color.set(0x00ffff);
+  }
+}
+function deleteHeld(c){
+  const m = c.userData.held;
+  if (!m) return;
+  for (const o of controllers) if (o.userData.held === m) o.userData.held = null;
+  if (twoHand && twoHand.obj === m) releaseAll();
+  c.userData.lineMat.color.set(0x00ffff);
+  disposePhoto(m);
+  drawPanel();
+}
+function removeAllPhotos(){
+  releaseAll();
+  [...photos].forEach(disposePhoto);
+  status.textContent = '写真を全部消しました。';
+  drawPanel();
+}
+
 function pressed(c, idx){
   const gp = c.userData.gamepad;
   const now = !!(gp && gp.buttons[idx] && gp.buttons[idx].pressed);
@@ -806,7 +859,10 @@ function updateFade(){
 
 renderer.setAnimationLoop(() => {
   for (const c of controllers){
-    if (pressed(c, 3)) togglePanel();
+    if (pressed(c, 3)){
+      if (c.userData.held) deleteHeld(c);   // つかんでいれば その写真を削除
+      else togglePanel();                   // つかんでいなければ 調整パネル
+    }
     if (pressed(c, 4) && c.userData.held){
       const m = c.userData.held;
       setCut(m, !m.userData.cut);
