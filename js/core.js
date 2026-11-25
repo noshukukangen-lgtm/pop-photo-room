@@ -31,6 +31,8 @@ const PARAMS = A.PARAMS = [
     fmt:v => v.toFixed(2) },
   { key:'depthCut', label:'人物の後ろを削る',  min:0,    max:1,    step:0.05, def:0,
     fmt:v => v <= 0 ? 'なし' : Math.round(v*100) + '%' },
+  { key:'follow',   label:'こっちを向く',      min:0,    max:1,    step:0.1,  def:1,
+    fmt:v => v <= 0 ? 'なし' : Math.round(v*100) + '%' },
   { key:'fade',     label:'斜めで薄く消す',    min:20,   max:90,   step:5,    def:60,
     fmt:v => v >= 90 ? 'なし' : v + '°〜' },
   { key:'handHole', label:'手の透明・太さ',    min:0,    max:0.3,  step:0.02, def:0.12,
