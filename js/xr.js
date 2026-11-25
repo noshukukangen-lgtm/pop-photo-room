@@ -16,6 +16,7 @@ const panelRows = [
   { type:'footer' },
 ];
 let clearArmed = 0;   // 「全部消す」の確認待ち（押した時刻）
+let hoverIds = [];    // 今コントローラーで指しているボタン（左右の手の分）
 const PH = HEAD + panelRows.length * ROWH + 24;
 const pc = document.createElement('canvas'); pc.width = PW; pc.height = PH;
 const ptex = new THREE.CanvasTexture(pc); ptex.colorSpace = THREE.SRGBColorSpace;
@@ -30,26 +31,27 @@ scene.add(panel);
 
 function rowButtons(r, i){
   const y = HEAD + i*ROWH, y0 = y + 10, y1 = y + ROWH - 10;
-  if (r.type === 'num') return [
+  let list;
+  if (r.type === 'num') list = [
     { x0:660, x1:810, y0, y1, text:'−', act:() => A.setParam(r.p.key, settings[r.p.key] - r.p.step) },
     { x0:850, x1:1000, y0, y1, text:'+', act:() => A.setParam(r.p.key, settings[r.p.key] + r.p.step) },
   ];
-  if (r.type === 'cycle') return [
+  else if (r.type === 'cycle') list = [
     { x0:660, x1:1000, y0, y1, text: r.p.names[settings[r.p.key]], act:() => {
       const o = r.p.options; A.setParam(r.p.key, o[(o.indexOf(settings[r.p.key]) + 1) % o.length]);
     }},
   ];
-  if (r.type === 'cutall') return [
+  else if (r.type === 'cutall') list = [
     { x0:660, x1:1000, y0, y1, text: A.allCut ? 'ON' : 'OFF', act:() => {
       A.allCut = !A.allCut; photos.forEach(m => A.setCut(m, A.allCut)); A.drawPanel();
     }},
   ];
-  if (r.type === 'arrange') return [
+  else if (r.type === 'arrange') list = [
     { x0:660, x1:1000, y0, y1, text:'取り囲む', act:() => { A.arrangeAround(); A.drawPanel(); } },
   ];
-  if (r.type === 'clear'){
+  else if (r.type === 'clear'){
     const armed = performance.now() - clearArmed < 3000;
-    return [
+    list = [
       { x0:660, x1:1000, y0, y1, text: armed ? 'もう一度で消去' : '全部消す', danger:true, act:() => {
         if (performance.now() - clearArmed < 3000){ clearArmed = 0; removeAllPhotos(); }
         else { clearArmed = performance.now(); setTimeout(A.drawPanel, 3100); }
@@ -57,10 +59,12 @@ function rowButtons(r, i){
       }},
     ];
   }
-  return [
+  else list = [
     { x0:30,  x1:500,  y0, y1, text:'初期値に戻す', act:() => A.resetParams() },
     { x0:530, x1:1000, y0, y1, text:'閉じる', act:() => { panel.visible = false; } },
   ];
+  list.forEach((b, k) => b.id = i + '-' + k);
+  return list;
 }
 
 function rr(g, x, y, w, h, r){
@@ -81,6 +85,8 @@ A.drawPanel = () => {
 
   panelRows.forEach((r, i) => {
     const cy = HEAD + i*ROWH + ROWH/2;
+    const rowHover = hoverIds.some(id => id && id.startsWith(i + '-'));
+    if (rowHover){ g.fillStyle = 'rgba(80,140,255,0.15)'; rr(g, 16, HEAD + i*ROWH + 4, PW - 32, ROWH - 8, 16); g.fill(); }
     g.textAlign = 'left'; g.fillStyle = '#eee'; g.font = '36px sans-serif';
     if (r.type === 'num' || r.type === 'cycle') g.fillText(r.p.label, 36, cy);
     if (r.type === 'cutall') g.fillText('切り抜き（全部）', 36, cy);
@@ -91,7 +97,10 @@ A.drawPanel = () => {
       g.fillText(r.p.fmt(settings[r.p.key]), 640, cy);
     }
     for (const b of rowButtons(r, i)){
-      g.fillStyle = b.danger ? '#7a2630' : '#2d3a4f'; rr(g, b.x0, b.y0, b.x1-b.x0, b.y1-b.y0, 18); g.fill();
+      const hot = hoverIds.includes(b.id);
+      g.fillStyle = hot ? (b.danger ? '#e04858' : '#3d8bff') : (b.danger ? '#7a2630' : '#2d3a4f');
+      rr(g, b.x0, b.y0, b.x1-b.x0, b.y1-b.y0, 18); g.fill();
+      if (hot){ g.strokeStyle = '#fff'; g.lineWidth = 6; rr(g, b.x0, b.y0, b.x1-b.x0, b.y1-b.y0, 18); g.stroke(); }
       g.fillStyle = '#fff'; g.textAlign = 'center';
       g.font = (b.text === '+' || b.text === '−') ? 'bold 52px sans-serif' : 'bold 34px sans-serif';
       g.fillText(b.text, (b.x0+b.x1)/2, (b.y0+b.y1)/2 + 2);
@@ -115,13 +124,18 @@ function togglePanel(){
   panel.visible = true;
 }
 
-function clickPanel(hit){
-  const px = hit.uv.x * PW, py = (1 - hit.uv.y) * PH;
-  panelRows.forEach((r, i) => {
-    for (const b of rowButtons(r, i)){
-      if (px >= b.x0 && px <= b.x1 && py >= b.y0 && py <= b.y1) b.act();
+function buttonAt(uv){
+  const px = uv.x * PW, py = (1 - uv.y) * PH;
+  for (let i = 0; i < panelRows.length; i++){
+    for (const b of rowButtons(panelRows[i], i)){
+      if (px >= b.x0 && px <= b.x1 && py >= b.y0 && py <= b.y1) return b;
     }
-  });
+  }
+  return null;
+}
+function clickPanel(hit){
+  const b = buttonAt(hit.uv);
+  if (b) b.act();
 }
 
 // =====================================================================
@@ -141,8 +155,20 @@ function setRay(c){
   raycaster.ray.origin.setFromMatrixPosition(c.matrixWorld);
   raycaster.ray.direction.set(0,0,-1).applyMatrix4(m);
 }
-function buzz(c){
-  try { const h = c.userData.gamepad && c.userData.gamepad.hapticActuators; h && h[0] && h[0].pulse(0.6, 60); } catch (e) {}
+function buzz(c, power = 0.6, ms = 60){
+  try { const h = c.userData.gamepad && c.userData.gamepad.hapticActuators; h && h[0] && h[0].pulse(power, ms); } catch (e) {}
+}
+
+// 指している場所に出す白い点
+function makeDot(){
+  const d = new THREE.Mesh(
+    new THREE.SphereGeometry(0.006, 12, 8),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false })
+  );
+  d.renderOrder = 1000;
+  d.visible = false;
+  scene.add(d);
+  return d;
 }
 
 const controllers = [0,1].map(i => {
@@ -152,7 +178,9 @@ const controllers = [0,1].map(i => {
     new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0,0,-1)]), lineMat);
   line.scale.z = 3;
   c.add(line);
+  c.userData.line = line;
   c.userData.lineMat = lineMat;
+  c.userData.dot = makeDot();
   c.userData.prevBtn = {};
   c.addEventListener('connected', e => c.userData.gamepad = e.data.gamepad);
 
@@ -160,7 +188,7 @@ const controllers = [0,1].map(i => {
     setRay(c);
     if (panel.visible){
       const ph = raycaster.intersectObject(panel, false)[0];
-      if (ph){ clickPanel(ph); return; }
+      if (ph){ clickPanel(ph); buzz(c, 0.3, 30); return; }
     }
     const hit = raycaster.intersectObjects(photos, false)[0];
     if (!hit) return;
@@ -200,6 +228,36 @@ const controllers = [0,1].map(i => {
   scene.add(c);
   return c;
 });
+
+// パネルのどこを指しているかを毎フレーム調べて、変わったら描き直す
+function updatePanelHover(){
+  const ids = [];
+  controllers.forEach((c, i) => {
+    const dot = c.userData.dot;
+    let hit = null;
+    if (panel.visible && renderer.xr.isPresenting && !c.userData.held){
+      setRay(c);
+      hit = raycaster.intersectObject(panel, false)[0] || null;
+    }
+    if (hit){
+      dot.position.copy(hit.point);
+      dot.visible = true;
+      c.userData.line.scale.z = hit.distance;   // 光線をパネルで止める
+      const b = buttonAt(hit.uv);
+      ids[i] = b ? b.id : null;
+    } else {
+      dot.visible = false;
+      c.userData.line.scale.z = 3;
+      ids[i] = null;
+    }
+  });
+  if (ids[0] !== hoverIds[0] || ids[1] !== hoverIds[1]){
+    // 新しいボタンに乗ったら軽く震える
+    controllers.forEach((c, i) => { if (ids[i] && ids[i] !== hoverIds[i]) buzz(c, 0.15, 15); });
+    hoverIds = ids;
+    A.drawPanel();
+  }
+}
 
 // ===== 写真の削除 =====
 function disposePhoto(m){
@@ -321,6 +379,7 @@ renderer.setAnimationLoop((time, frame) => {
       c.userData.lineMat.color.set(A.findSnap(obj) ? GREEN : CYAN);
     }
   }
+  updatePanelHover();
   updateFade();
   updateHands();
   renderer.render(scene, camera);
