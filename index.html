@@ -75,7 +75,8 @@
     片手トリガー：つかんで移動 ／ 両手トリガー：広げて拡大縮小 ／ つかんでスティック上下：微調整<br>
     写真に手を近づけると、手から前に伸びる楕円の範囲だけ写真が透けます（調整パネルで太さ・長さを変更、太さ0で無効）<br>
     つかんで A・X：その写真の切り抜き切替 ／ B・Y：全部の切り抜き切替<br>
-    <b>スティック押し込み：調整パネル ／ つかんだままスティック押し込み：その写真を削除</b>
+    <b>スティック押し込み：調整パネル ／ つかんだままスティック押し込み：その写真を削除</b><br>
+    VRに入ると、写真は人の大きさで目の高さに自分を取り囲むように並びます（調整パネルの「取り囲む」でいつでも並べ直し）
   </div>
   <div id="status">読み込み中…</div>
 
@@ -713,18 +714,83 @@ function buildPhotoMesh(d, index){
   back.raycast = () => {};       // 裏の影はつかめないようにする
   mesh.add(back);
   const B = computeBulge(M, gw, gh, h);
-  Object.assign(mesh.userData, { back, G, M, B, gw, gh, ref, smoothR: null });
+  Object.assign(mesh.userData, { back, G, M, B, gw, gh, ref, smoothR: null, layout: personLayout(M, gw, gh, w, h) });
 
   applyGeometry(mesh);
   setCut(mesh, $('cutDefault').checked);
 
-  const col = index % 5, row = Math.floor(index / 5);
-  mesh.position.set((col-2)*0.8, 1.5 - row*0.8, -1.5);
   scene.add(mesh);
   photos.push(mesh);
+  arrangeAround();   // VRに入ったときにもう一度、目の高さで取り囲むように並べ直す
   applyLook();
   drawPanel();
 }
+
+// =====================================================================
+// 初期レイアウト：人の大きさにして、目の高さで自分を取り囲むように並べる
+// =====================================================================
+const EYE_FALLBACK = 1.5;   // まだVRに入っていないときの目の高さ（m）
+const GAP = 0.35;           // 写真どうしのすき間（m）
+const MIN_RADIUS = 1.8;     // 自分からの距離（m）
+
+// 切り抜きの範囲から「人の大きさ」を決める
+function personLayout(M, gw, gh, w, h){
+  let top = gh, bottom = -1, left = gw, right = -1;
+  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++){
+    if (M[y*gw + x] > 0.5){
+      if (y < top) top = y; if (y > bottom) bottom = y;
+      if (x < left) left = x; if (x > right) right = x;
+    }
+  }
+  if (bottom < 0 || bottom - top < gh * 0.05){
+    // 人が見つからないときは、写真の高さを1.2mにして真ん中を目の高さに
+    const s = 1.2 / h;
+    return { s, top: h / 2 - 0.1 / s, cx: 0, width: w * s };
+  }
+  const localTop = h / 2 - top / gh * h;
+  const personH = (bottom - top + 1) / gh * h;
+  const fullBody = bottom < gh - 3;          // 足元まで写っているか
+  const s = (fullBody ? 1.6 : 0.9) / personH; // 全身なら身長1.6m、上半身なら0.9m
+  const cx = ((left + right + 1) / 2 / gw - 0.5) * w;
+  return { s, top: localTop, cx, width: (right - left + 1) / gw * w * s };
+}
+
+const tmpC = new THREE.Vector3(), tmpF = new THREE.Vector3();
+function arrangeAround(){
+  if (!photos.length) return;
+  releaseAll();
+  camera.getWorldPosition(tmpC);
+  camera.getWorldDirection(tmpF);
+  const eyeY = renderer.xr.isPresenting ? tmpC.y : EYE_FALLBACK;
+  if (!renderer.xr.isPresenting){ tmpC.set(0, 0, 0); tmpF.set(0, 0, -1); }
+  tmpF.y = 0;
+  if (tmpF.lengthSq() < 1e-4) tmpF.set(0, 0, -1);
+  tmpF.normalize();
+
+  const widths = photos.map(m => m.userData.layout.width + GAP);
+  const total = widths.reduce((a, b) => a + b, 0);
+  const R = Math.max(MIN_RADIUS, total / (2 * Math.PI));
+  const span = Math.min(2 * Math.PI, total / R);
+  let phi = span / 2;   // 左から右へ
+  photos.forEach((m, i) => {
+    const L = m.userData.layout;
+    const a = phi - widths[i] / R / 2;
+    phi -= widths[i] / R;
+    const dx = tmpF.x * Math.cos(a) + tmpF.z * Math.sin(a);
+    const dz = -tmpF.x * Math.sin(a) + tmpF.z * Math.cos(a);
+    m.scale.setScalar(L.s);
+    // 頭のてっぺんが目の高さより少し上に来るように
+    const y = eyeY + 0.15 - L.s * L.top;
+    m.position.set(tmpC.x + dx * R, y, tmpC.z + dz * R);
+    m.lookAt(tmpC.x, y, tmpC.z);
+    m.translateX(-L.s * L.cx);   // 人が写真の真ん中にいなくても、自分の正面に来るように
+  });
+  status.textContent = `${photos.length} 枚を目の高さで取り囲むように並べました。`;
+}
+
+// VRに入ったら、自分の位置と向きに合わせて並べ直す
+let arrangeWait = -1;
+renderer.xr.addEventListener('sessionstart', () => { arrangeWait = 15; });
 
 async function makePopPhoto(file, index, label){
   const data = (await isPopFile(file)) ? await readPopFile(file, label) : await analyzeWithAI(file, label);
@@ -764,6 +830,7 @@ const PW = 1024, HEAD = 110, ROWH = 92;
 const panelRows = [
   ...PARAMS.map(p => ({ type: p.options ? 'cycle' : 'num', p })),
   { type:'cutall' },
+  { type:'arrange' },
   { type:'clear' },
   { type:'footer' },
 ];
@@ -795,6 +862,9 @@ function rowButtons(r, i){
     { x0:660, x1:1000, y0, y1, text: allCut ? 'ON' : 'OFF', act:() => {
       allCut = !allCut; photos.forEach(m => setCut(m, allCut)); drawPanel();
     }},
+  ];
+  if (r.type === 'arrange') return [
+    { x0:660, x1:1000, y0, y1, text:'取り囲む', act:() => { arrangeAround(); drawPanel(); } },
   ];
   if (r.type === 'clear'){
     const armed = performance.now() - clearArmed < 3000;
@@ -834,6 +904,7 @@ function drawPanel(){
     if (r.type === 'num' || r.type === 'cycle') g.fillText(r.p.label, 36, cy);
     if (r.type === 'cutall') g.fillText('切り抜き（全部）', 36, cy);
     if (r.type === 'clear') g.fillText(`写真（${photos.length} 枚）`, 36, cy);
+    if (r.type === 'arrange') g.fillText('並べ直す（人の大きさ）', 36, cy);
     if (r.type === 'num'){
       g.textAlign = 'right'; g.fillStyle = '#7cf'; g.font = 'bold 40px sans-serif';
       g.fillText(r.p.fmt(settings[r.p.key]), 640, cy);
@@ -1022,6 +1093,7 @@ function updateFade(){
 }
 
 renderer.setAnimationLoop(() => {
+  if (arrangeWait >= 0 && renderer.xr.isPresenting && arrangeWait-- === 0) arrangeAround();
   for (const c of controllers){
     if (pressed(c, 3)){
       if (c.userData.held) deleteHeld(c);   // つかんでいれば その写真を削除
