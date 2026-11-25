@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>飛び出す写真ルーム（高画質・切り抜き対応）</title>
+<style>
+  body{margin:0;font-family:sans-serif;background:#111;color:#eee}
+  #ui{position:fixed;top:0;left:0;right:0;padding:16px;background:#000c;z-index:10}
+  #status{margin-top:8px;font-size:14px}
+  label{font-size:14px;margin-right:12px}
+  .bar{margin-top:8px;font-size:13px}
+  .track{height:14px;background:#333;border-radius:7px;overflow:hidden;margin-top:4px}
+  .fill{height:100%;width:0%;background:linear-gradient(90deg,#0cf,#6f6);transition:width .2s}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<div id="ui">
+  <input type="file" id="files" accept="image/*" multiple>
+  <div style="margin-top:8px">
+    <label>飛び出し量 <input type="range" id="depthScale" min="0.05" max="0.6" step="0.05" value="0.25"></label>
+    <label><input type="checkbox" id="cutDefault" checked> 人物を切り抜く（最初の状態）</label>
+    <button id="cutAllOn">全部 切り抜きON</button>
+    <button id="cutAllOff">全部 切り抜きOFF</button>
+  </div>
+  <div id="status">写真を選んでください（何枚でもOK）。準備ができたら下の「START AR」を押します。</div>
+
+  <div id="dlBox" class="bar hidden">
+    <span id="dlText">AIをダウンロード中… 0%</span>
+    <div class="track"><div id="dlFill" class="fill"></div></div>
+  </div>
+  <div id="allBox" class="bar hidden">
+    <span id="allText">全体 0 / 0 枚</span>
+    <div class="track"><div id="allFill" class="fill"></div></div>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.164.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.164.0/examples/jsm/"
+}}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { ARButton } from 'three/addons/webxr/ARButton.js';
+import { pipeline } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
+
+const $ = id => document.getElementById(id);
+const status = $('status');
+
+// ===== プログレスバー =====
+function setBar(box, fill, text, ratio, label){
+  $(box).classList.remove('hidden');
+  $(fill).style.width = (Math.max(0, Math.min(1, ratio)) * 100).toFixed(1) + '%';
+  $(text).textContent = label;
+}
+const dlFiles = {};
+function onDownloadProgress(p){
+  if (p.status === 'progress' && p.total){
+    dlFiles[p.name + '/' + p.file] = { loaded:p.loaded, total:p.total };
+    let loaded = 0, total = 0;
+    for (const f of Object.values(dlFiles)){ loaded += f.loaded; total += f.total; }
+    const mb = x => (x/1048576).toFixed(1);
+    setBar('dlBox','dlFill','dlText', loaded/total,
+      `AIをダウンロード中… ${Math.round(loaded/total*100)}%（${mb(loaded)} / ${mb(total)} MB）`);
+  }
+}
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.01, 50);
+
+// ===== 高画質設定 =====
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setFramebufferScaleFactor(1.5);
+renderer.xr.setFoveation(0);
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(ARButton.create(renderer, { optionalFeatures:['local-floor'] }));
+
+const MAX_TEX = Math.min(renderer.capabilities.maxTextureSize, 4096);
+const ANISO = renderer.capabilities.getMaxAnisotropy();
+
+const photos = [];
+let depthModel = null, cutModel = null;
+
+async function loadModels(){
+  if (!depthModel){
+    status.textContent = '奥行きAIを準備中…（初回だけダウンロードがあります）';
+    depthModel = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small',
+      { progress_callback: onDownloadProgress });
+  }
+  if (!cutModel){
+    status.textContent = '切り抜きAIを準備中…（初回だけダウンロードがあります）';
+    cutModel = await pipeline('background-removal', 'Xenova/modnet',
+      { progress_callback: onDownloadProgress });
+  }
+  setBar('dlBox','dlFill','dlText', 1, 'AIの準備完了');
+}
+
+function loadImage(url){
+  return new Promise(r => { const img = new Image(); img.onload = () => r(img); img.src = url; });
+}
+
+function toTexture(canvas){
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = ANISO;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
+  return tex;
+}
+
+// 元画像を高画質のままキャンバスへ
+function drawPhoto(img){
+  let w = img.width, h = img.height;
+  const k = Math.min(1, MAX_TEX / Math.max(w, h));
+  w = Math.round(w*k); h = Math.round(h*k);
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, w, h);
+  return cv;
+}
+
+// 切り抜きマスクを元画像サイズに合わせて透明度として適用
+function makeCutCanvas(photoCanvas, maskImage){
+  const w = photoCanvas.width, h = photoCanvas.height;
+  const maskSrc = maskImage.toCanvas();
+  const mc = document.createElement('canvas');
+  mc.width = w; mc.height = h;
+  const mctx = mc.getContext('2d');
+  mctx.imageSmoothingQuality = 'high';
+  mctx.drawImage(maskSrc, 0, 0, w, h);
+  const mask = mctx.getImageData(0, 0, w, h).data;
+  const useAlpha = maskImage.channels === 4;
+
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.drawImage(photoCanvas, 0, 0);
+  const px = ctx.getImageData(0, 0, w, h);
+  for (let i = 0; i < w*h; i++){
+    px.data[i*4+3] = useAlpha ? mask[i*4+3] : mask[i*4];
+  }
+  ctx.putImageData(px, 0, 0);
+  return cv;
+}
+
+function setCut(mesh, on){
+  mesh.userData.cut = on;
+  mesh.material = on ? mesh.userData.matCut : mesh.userData.matFull;
+}
+
+async function makePopPhoto(file, index){
+  const url = URL.createObjectURL(file);
+  const img = await loadImage(url);
+  await loadModels();
+
+  const depth = (await depthModel(url)).depth;
+  const cutResult = await cutModel(url);
+  const maskImage = Array.isArray(cutResult) ? cutResult[0] : cutResult;
+
+  const aspect = img.width / img.height;
+  const h = 0.6, w = h * aspect;
+  const seg = 256;
+  const geo = new THREE.PlaneGeometry(w, h, seg, Math.max(2, Math.round(seg/aspect)));
+  const pos = geo.attributes.position;
+  const uv = geo.attributes.uv;
+  const scale = parseFloat($('depthScale').value);
+
+  const D = (x, y) => depth.data[(y*depth.width + x) * depth.channels] / 255;
+  for (let i = 0; i < pos.count; i++){
+    const fx = uv.getX(i) * (depth.width-1);
+    const fy = (1 - uv.getY(i)) * (depth.height-1);
+    const x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const x1 = Math.min(x0+1, depth.width-1), y1 = Math.min(y0+1, depth.height-1);
+    const ax = fx - x0, ay = fy - y0;
+    const d = D(x0,y0)*(1-ax)*(1-ay) + D(x1,y0)*ax*(1-ay) + D(x0,y1)*(1-ax)*ay + D(x1,y1)*ax*ay;
+    pos.setZ(i, d * scale);
+  }
+  geo.computeVertexNormals();
+
+  const photoCanvas = drawPhoto(img);
+  const matFull = new THREE.MeshBasicMaterial({ map: toTexture(photoCanvas), side: THREE.DoubleSide });
+  const matCut = new THREE.MeshBasicMaterial({
+    map: toTexture(makeCutCanvas(photoCanvas, maskImage)),
+    side: THREE.DoubleSide,
+    alphaTest: 0.4
+  });
+
+  const mesh = new THREE.Mesh(geo, matFull);
+  mesh.userData.matFull = matFull;
+  mesh.userData.matCut = matCut;
+  setCut(mesh, $('cutDefault').checked);
+
+  const col = index % 5, row = Math.floor(index / 5);
+  mesh.position.set((col-2)*0.8, 1.5 - row*0.8, -1.5);
+  scene.add(mesh);
+  photos.push(mesh);
+}
+
+$('files').addEventListener('change', async e => {
+  const files = [...e.target.files];
+  const n = files.length;
+  const t0 = performance.now();
+  for (let i = 0; i < n; i++){
+    let eta = '';
+    if (i > 0){
+      const per = (performance.now() - t0) / i / 1000;
+      eta = `（残り約 ${Math.ceil(per * (n - i))} 秒）`;
+    }
+    setBar('allBox','allFill','allText', i/n, `全体 ${i} / ${n} 枚 完了 ${eta}`);
+    status.textContent = `${i+1} 枚目を立体化・切り抜き中…`;
+    await makePopPhoto(files[i], photos.length);
+  }
+  setBar('allBox','allFill','allText', 1, `全体 ${n} / ${n} 枚 完了`);
+  status.textContent = `合計 ${photos.length} 枚 準備完了。START AR を押してください。`;
+  e.target.value = '';
+});
+
+$('cutAllOn').onclick  = () => photos.forEach(m => setCut(m, true));
+$('cutAllOff').onclick = () => photos.forEach(m => setCut(m, false));
+
+// ===== コントローラー操作 =====
+// 片手トリガー：つかんで移動・回転
+// 両手トリガー：同じ写真を両手でつかみ、手を広げる／縮めるで拡大縮小
+// つかんだままスティック上下：微調整の拡大縮小
+// つかんだまま A / X ボタン：その写真の切り抜き ON / OFF
+// B / Y ボタン：全部の写真の切り抜きを一括で ON / OFF
+const raycaster = new THREE.Raycaster();
+const tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3();
+let twoHand = null;
+let allCut = true;
+
+function handDistance(){
+  controllers[0].getWorldPosition(tmpA);
+  controllers[1].getWorldPosition(tmpB);
+  return tmpA.distanceTo(tmpB);
+}
+
+const controllers = [0,1].map(i => {
+  const c = renderer.xr.getController(i);
+  const lineMat = new THREE.LineBasicMaterial({ color:0x00ffff });
+  const line = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0,0,-1)]), lineMat);
+  line.scale.z = 3;
+  c.add(line);
+  c.userData.lineMat = lineMat;
+  c.userData.prevBtn = {};
+  c.addEventListener('connected', e => c.userData.gamepad = e.data.gamepad);
+
+  c.addEventListener('selectstart', () => {
+    const m = new THREE.Matrix4().extractRotation(c.matrixWorld);
+    raycaster.ray.origin.setFromMatrixPosition(c.matrixWorld);
+    raycaster.ray.direction.set(0,0,-1).applyMatrix4(m);
+    const hit = raycaster.intersectObjects(photos)[0];
+    if (!hit) return;
+    const other = controllers[1 - i];
+    if (other.userData.held === hit.object){
+      twoHand = { obj: hit.object, d0: handDistance(), s0: hit.object.scale.x };
+      c.userData.scaler = true;
+      c.userData.lineMat.color.set(0xffcc00);
+      other.userData.lineMat.color.set(0xffcc00);
+    } else {
+      c.attach(hit.object);
+      c.userData.held = hit.object;
+    }
+  });
+
+  c.addEventListener('selectend', () => {
+    const other = controllers[1 - i];
+    if (c.userData.scaler){
+      c.userData.scaler = false;
+      twoHand = null;
+    }
+    if (c.userData.held){
+      scene.attach(c.userData.held);
+      c.userData.held = null;
+      twoHand = null;
+      other.userData.scaler = false;
+    }
+    c.userData.lineMat.color.set(0x00ffff);
+    other.userData.lineMat.color.set(0x00ffff);
+  });
+
+  scene.add(c);
+  return c;
+});
+
+// ボタンを「押した瞬間」だけ反応させる
+function pressed(c, idx){
+  const gp = c.userData.gamepad;
+  const now = !!(gp && gp.buttons[idx] && gp.buttons[idx].pressed);
+  const was = !!c.userData.prevBtn[idx];
+  c.userData.prevBtn[idx] = now;
+  return now && !was;
+}
+
+renderer.setAnimationLoop(() => {
+  for (const c of controllers){
+    if (pressed(c, 4) && c.userData.held){
+      const m = c.userData.held;
+      setCut(m, !m.userData.cut);
+    }
+    if (pressed(c, 5)){
+      allCut = !allCut;
+      photos.forEach(m => setCut(m, allCut));
+    }
+  }
+
+  if (twoHand){
+    const s = twoHand.s0 * handDistance() / twoHand.d0;
+    twoHand.obj.scale.setScalar(Math.min(20, Math.max(0.05, s)));
+  } else {
+    for (const c of controllers){
+      const obj = c.userData.held, gp = c.userData.gamepad;
+      if (obj && gp && gp.axes.length >= 4){
+        obj.scale.multiplyScalar(1 - gp.axes[3] * 0.02);
+      }
+    }
+  }
+  renderer.render(scene, camera);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
