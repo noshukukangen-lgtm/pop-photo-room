@@ -72,6 +72,7 @@
   </details>
   <div class="help">
     片手トリガー：つかんで移動 ／ 両手トリガー：広げて拡大縮小 ／ つかんでスティック上下：微調整<br>
+    写真に手を近づけると、手の周りだけ写真が透けます（調整パネルで大きさ変更・0で無効）<br>
     つかんで A・X：その写真の切り抜き切替 ／ B・Y：全部の切り抜き切替<br>
     <b>スティック押し込み：調整パネル ／ つかんだままスティック押し込み：その写真を削除</b>
   </div>
@@ -120,6 +121,8 @@ const PARAMS = [
     fmt:v => v <= 0 ? 'なし' : Math.round(v*100) + '%' },
   { key:'fade',     label:'斜めで薄く消す',    min:20,   max:90,   step:5,    def:60,
     fmt:v => v >= 90 ? 'なし' : v + '°〜' },
+  { key:'handHole', label:'手の周りを透明に',  min:0,    max:0.3,  step:0.02, def:0.12,
+    fmt:v => v <= 0 ? 'なし' : Math.round(v*100) + 'cm' },
   { key:'back',     label:'裏側',            options:['hide','shadow','show'], def:'shadow',
     names:{ hide:'非表示', shadow:'影', show:'表示' } },
 ];
@@ -420,8 +423,10 @@ function medianMasked(G, M){
 // =====================================================================
 const VERT = `
 varying vec2 vUv;
+varying vec3 vWorld;
 void main(){
   vUv = uv;
+  vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }`;
 const FRAG = `
@@ -429,7 +434,10 @@ uniform sampler2D map;
 uniform sampler2D maskMap;
 uniform sampler2D depthMap;
 uniform float uCut, uThresh, uDepthCut, uRef, uOpacity, uShadow;
+uniform vec3 uHand0, uHand1;
+uniform float uHandR;
 varying vec2 vUv;
+varying vec3 vWorld;
 void main(){
   if (uOpacity < 0.01) discard;
   vec4 c = texture2D(map, vUv);
@@ -443,9 +451,23 @@ void main(){
   }
   vec3 col = uShadow > 0.5 ? vec3(0.0) : c.rgb;
   float alpha = (uShadow > 0.5 ? 0.55 : 1.0) * uOpacity;
+  // 自分の手（コントローラー）の周りは透明にして、本物の手が見えるようにする
+  if (uHandR > 0.001){
+    float d = min(distance(vWorld, uHand0), distance(vWorld, uHand1));
+    if (d < uHandR) discard;
+    alpha *= smoothstep(uHandR, uHandR + 0.04, d);
+  }
   gl_FragColor = vec4(col, alpha);
   #include <colorspace_fragment>
 }`;
+
+// 手の位置はすべての写真で共通（毎フレーム更新）
+const FAR = new THREE.Vector3(9999, 9999, 9999);
+const handU = {
+  uHand0: { value: FAR.clone() },
+  uHand1: { value: FAR.clone() },
+  uHandR: { value: settings.handHole },
+};
 
 function makeMaterial(tex, ref, shadow){
   return new THREE.ShaderMaterial({
@@ -459,6 +481,7 @@ function makeMaterial(tex, ref, shadow){
       uRef:     { value: ref },
       uOpacity: { value: 1 },
       uShadow:  { value: shadow ? 1 : 0 },
+      ...handU,
     },
     vertexShader: VERT,
     fragmentShader: FRAG,
@@ -500,6 +523,7 @@ function applyGeometry(mesh){
 
 // しきい値・後ろを削る・裏側 を反映
 function applyLook(){
+  handU.uHandR.value = settings.handHole;
   for (const m of photos){
     for (const mat of [m.material, m.userData.back.material]){
       mat.uniforms.uThresh.value = settings.thresh;
@@ -812,6 +836,16 @@ function removeAllPhotos(){
   drawPanel();
 }
 
+// 手・コントローラーの位置（グリップ）
+const grips = [0,1].map(i => { const g = renderer.xr.getControllerGrip(i); scene.add(g); return g; });
+function updateHands(){
+  grips.forEach((g, i) => {
+    const u = handU['uHand' + i].value;
+    if (renderer.xr.isPresenting && g.visible) g.getWorldPosition(u);
+    else u.copy(FAR);
+  });
+}
+
 function pressed(c, idx){
   const gp = c.userData.gamepad;
   const now = !!(gp && gp.buttons[idx] && gp.buttons[idx].pressed);
@@ -874,6 +908,7 @@ renderer.setAnimationLoop(() => {
     }
   }
   updateFade();
+  updateHands();
   renderer.render(scene, camera);
 });
 
