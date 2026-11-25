@@ -71,6 +71,7 @@
     <button id="resetTune" style="margin-top:6px">初期値に戻す</button>
   </details>
   <div class="help">
+    <b>Colabで作った「〜_pop.png」を選ぶと、AIを使わずに高精細の切り抜き・奥行きのまま読み込みます</b>（普通の写真と混ぜて選んでもOK）<br>
     片手トリガー：つかんで移動 ／ 両手トリガー：広げて拡大縮小 ／ つかんでスティック上下：微調整<br>
     写真に手を近づけると、手から前に伸びる楕円の範囲だけ写真が透けます（調整パネルで太さ・長さを変更、太さ0で無効）<br>
     つかんで A・X：その写真の切り抜き切替 ／ B・Y：全部の切り抜き切替<br>
@@ -238,7 +239,7 @@ document.body.appendChild(renderer.domElement);
 document.body.appendChild(ARButton.createButton(renderer, { optionalFeatures:['local-floor'] }));
 
 const MAX_TEX = Math.min(renderer.capabilities.maxTextureSize, 4096);
-const MAX_MASK = 2048;   // 切り抜きマスクの最大解像度
+const MAX_MASK = 2048;   // 切り抜きマスクの最大解像度（ブラウザのAIで作るとき）
 const GRID = 512;        // 奥行き計算用の解像度（長辺）
 const ANISO = renderer.capabilities.getMaxAnisotropy();
 
@@ -548,23 +549,92 @@ function applyLook(){
   }
 }
 
-async function makePopPhoto(file, index, label){
+// =====================================================================
+// 写真の読み込み（2通り）
+//  ・普通の写真 → ブラウザのAIで奥行きと切り抜きを作る
+//  ・Colabで作った「〜_pop.png」 → AIを使わず、中のデータをそのまま使う
+//     左半分＝写真、右半分＝ 赤:奥行き上位8bit / 緑:奥行き下位8bit / 青:切り抜き
+// =====================================================================
+const isPopFile = f => /_pop\.png$/i.test(f.name);
+
+async function analyzeWithAI(file, label){
   const url = URL.createObjectURL(file);
-  const img = await loadImage(url);
-  await loadDepthModel();
+  try {
+    const img = await loadImage(url);
+    await loadDepthModel();
+    status.textContent = `${label}：奥行きを推定中…`;
+    const depthRaw = (await depthModel(url)).depth;
+    status.textContent = `${label}：人物を切り抜き中…`;
+    const maskRaw = await runCutout(file, url);
 
-  status.textContent = `${label}：奥行きを推定中…`;
-  const depthRaw = (await depthModel(url)).depth;
-  status.textContent = `${label}：人物を切り抜き中…`;
-  const maskRaw = await runCutout(file, url);
+    const [gw, gh] = fitSize(img.width, img.height, GRID);
+    const G = canvasToGrid(depthRaw.toCanvas(), gw, gh);
+    const [mw, mh] = fitSize(img.width, img.height, MAX_MASK);
+    const maskCanvas = rawToCanvas(maskRaw, mw, mh);
+    const M = canvasToGrid(maskCanvas, gw, gh);
+    return { src: img, width: img.width, height: img.height, G, M, gw, gh, maskCanvas };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
 
-  const aspect = img.width / img.height;
-  const [gw, gh] = fitSize(img.width, img.height, GRID);
-  const depthCanvas = depthRaw.toCanvas();
-  const G = canvasToGrid(depthCanvas, gw, gh);
-  const [mw, mh] = fitSize(img.width, img.height, MAX_MASK);
-  const maskCanvas = rawToCanvas(maskRaw, mw, mh);
-  const M = canvasToGrid(maskCanvas, gw, gh);
+async function readPopFile(file, label){
+  status.textContent = `${label}：Colabで作ったデータを読み込み中…`;
+  const url = URL.createObjectURL(file);
+  let img;
+  try { img = await loadImage(url); } finally { URL.revokeObjectURL(url); }
+  const W = Math.floor(img.width / 2), H = img.height;
+  if (W < 2 || img.width !== W * 2) throw new Error('Colabで作った _pop.png ではないようです（横幅が合いません）');
+
+  // 右半分（奥行き＋切り抜き）を読む
+  const rc = document.createElement('canvas');
+  rc.width = W; rc.height = H;
+  const rctx = rc.getContext('2d', { willReadFrequently: true });
+  rctx.drawImage(img, W, 0, W, H, 0, 0, W, H);
+  const id = rctx.getImageData(0, 0, W, H);
+  const px = id.data;
+
+  // 奥行き計算用の小さい格子に平均して縮める
+  const [gw, gh] = fitSize(W, H, GRID);
+  const G = new Float32Array(gw*gh), M = new Float32Array(gw*gh), cnt = new Float32Array(gw*gh);
+  for (let y = 0; y < H; y++){
+    const gy = Math.min(gh-1, Math.floor(y * gh / H));
+    for (let x = 0; x < W; x++){
+      const gx = Math.min(gw-1, Math.floor(x * gw / W));
+      const o = (y*W + x) * 4, g = gy*gw + gx;
+      G[g] += (px[o] * 256 + px[o+1]) / 65535;
+      M[g] += px[o+2] / 255;
+      cnt[g]++;
+    }
+  }
+  for (let i = 0; i < gw*gh; i++){
+    if (cnt[i] > 0){ G[i] /= cnt[i]; M[i] /= cnt[i]; }
+  }
+
+  // 切り抜き（青）を白黒の画像にして、高精細のままマスクにする
+  for (let i = 0; i < W*H; i++){
+    const o = i*4, v = px[o+2];
+    px[o] = v; px[o+1] = v; px[o+3] = 255;
+  }
+  rctx.putImageData(id, 0, 0);
+  const [mw, mh] = fitSize(W, H, MAX_TEX);
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = mw; maskCanvas.height = mh;
+  const mctx = maskCanvas.getContext('2d');
+  mctx.imageSmoothingQuality = 'high';
+  mctx.drawImage(rc, 0, 0, mw, mh);
+  rc.width = rc.height = 1;   // メモリを早めに返す
+
+  // 左半分（写真）
+  const lc = document.createElement('canvas');
+  lc.width = W; lc.height = H;
+  lc.getContext('2d').drawImage(img, 0, 0, W, H, 0, 0, W, H);
+  return { src: lc, width: W, height: H, G, M, gw, gh, maskCanvas };
+}
+
+function buildPhotoMesh(d, index){
+  const { G, M, gw, gh, maskCanvas } = d;
+  const aspect = d.width / d.height;
   const ref = medianMasked(G, M);
 
   // 奥行きテクスチャ（「人物の後ろを削る」用）
@@ -577,7 +647,7 @@ async function makePopPhoto(file, index, label){
   depthTex.magFilter = depthTex.minFilter = THREE.LinearFilter;
   depthTex.needsUpdate = true;
 
-  const tex = { photo: toTexture(drawPhoto(img)), mask: toTexture(maskCanvas, false), depth: depthTex };
+  const tex = { photo: toTexture(drawPhoto(d.src)), mask: toTexture(maskCanvas, false), depth: depthTex };
 
   const h = 0.6, w = h * aspect;
   const segX = aspect >= 1 ? 256 : Math.max(2, Math.round(256*aspect));
@@ -599,7 +669,11 @@ async function makePopPhoto(file, index, label){
   photos.push(mesh);
   applyLook();
   drawPanel();
-  URL.revokeObjectURL(url);
+}
+
+async function makePopPhoto(file, index, label){
+  const data = isPopFile(file) ? await readPopFile(file, label) : await analyzeWithAI(file, label);
+  buildPhotoMesh(data, index);
 }
 
 $('files').addEventListener('change', async e => {
