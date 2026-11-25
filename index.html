@@ -116,6 +116,8 @@ const PARAMS = [
     fmt:v => Math.round(v*100) + '%' },
   { key:'smooth',   label:'なめらかさ',       min:0,    max:12,   step:1,    def:3,    geo:true,
     fmt:v => String(v) },
+  { key:'inflate',  label:'ふくらみ（厚み）',  min:0,    max:1.5,  step:0.05, def:0.6,  geo:true,
+    fmt:v => v <= 0 ? 'なし' : Math.round(v*100) + '%' },
   { key:'thresh',   label:'切り抜きのしきい値', min:0.05, max:0.95, step:0.05, def:0.5,
     fmt:v => v.toFixed(2) },
   { key:'depthCut', label:'人物の後ろを削る',  min:0,    max:1,    step:0.05, def:0,
@@ -413,6 +415,48 @@ function smoothDepth(G, M, w, h, r){
   return P;
 }
 
+// 人物を風船のようにふくらませる形を作る（輪郭で0、太いところほど高い）
+// 切り抜きの中で「∇²h = -1、輪郭で h = 0」を解いて √(2h) にすると、
+// 腕のような細い部分は細い円柱、胴のような太い部分は太く丸くなる
+function computeBulge(M, gw, gh, photoH){
+  const [sw, sh] = fitSize(gw, gh, 160);
+  const inside = new Uint8Array(sw*sh);
+  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++){
+    const gx = Math.min(gw-1, Math.floor((x + 0.5) * gw / sw));
+    const gy = Math.min(gh-1, Math.floor((y + 0.5) * gh / sh));
+    inside[y*sw + x] = M[gy*gw + gx] > 0.5 ? 1 : 0;
+  }
+  const cell = photoH / sh, c = cell * cell, w = 1.94;
+  const h = new Float32Array(sw*sh);
+  for (let it = 0; it < 500; it++){
+    for (let y = 0; y < sh; y++){
+      for (let x = 0; x < sw; x++){
+        const i = y*sw + x;
+        if (!inside[i]) continue;
+        // 写真のふち（人物が画面で切れている所）は平らに伸ばす
+        const l = x > 0 ? h[i-1] : h[i], r = x < sw-1 ? h[i+1] : h[i];
+        const u = y > 0 ? h[i-sw] : h[i], d = y < sh-1 ? h[i+sw] : h[i];
+        h[i] += w * ((l + r + u + d + c) / 4 - h[i]);
+      }
+    }
+  }
+  let S = new Float32Array(sw*sh);
+  for (let i = 0; i < sw*sh; i++) S[i] = Math.sqrt(2 * Math.max(0, h[i]));
+  S = boxBlur(S, sw, sh, 1);
+  // 奥行きと同じ格子の大きさに戻す
+  const B = new Float32Array(gw*gh);
+  for (let y = 0; y < gh; y++){
+    const fy = Math.min(sh-1, Math.max(0, (y + 0.5) * sh / gh - 0.5));
+    const y0 = Math.floor(fy), y1 = Math.min(y0+1, sh-1), ay = fy - y0;
+    for (let x = 0; x < gw; x++){
+      const fx = Math.min(sw-1, Math.max(0, (x + 0.5) * sw / gw - 0.5));
+      const x0 = Math.floor(fx), x1 = Math.min(x0+1, sw-1), ax = fx - x0;
+      B[y*gw + x] = S[y0*sw+x0]*(1-ax)*(1-ay) + S[y0*sw+x1]*ax*(1-ay) + S[y1*sw+x0]*(1-ax)*ay + S[y1*sw+x1]*ax*ay;
+    }
+  }
+  return B;
+}
+
 function medianMasked(G, M){
   const vals = [];
   for (let i = 0; i < G.length; i++) if (M[i] > 0.5) vals.push(G[i]);
@@ -518,17 +562,18 @@ function applyGeometry(mesh){
     u.P = smoothDepth(u.G, u.M, u.gw, u.gh, settings.smooth);
     u.smoothR = settings.smooth;
   }
-  const { P, gw, gh, ref } = u;
+  const { P, B, gw, gh, ref } = u;
   const geo = mesh.geometry, pos = geo.attributes.position, uv = geo.attributes.uv;
-  const scale = settings.depth, relief = settings.relief;
+  const scale = settings.depth, relief = settings.relief, inflate = settings.inflate;
   for (let i = 0; i < pos.count; i++){
     const fx = uv.getX(i) * (gw-1), fy = (1 - uv.getY(i)) * (gh-1);
     const x0 = Math.floor(fx), y0 = Math.floor(fy);
     const x1 = Math.min(x0+1, gw-1), y1 = Math.min(y0+1, gh-1);
     const ax = fx - x0, ay = fy - y0;
     const d = P[y0*gw+x0]*(1-ax)*(1-ay) + P[y0*gw+x1]*ax*(1-ay) + P[y1*gw+x0]*(1-ax)*ay + P[y1*gw+x1]*ax*ay;
-    // 全体は ref の位置まで飛び出し、その周りの凹凸だけ relief 倍にする
-    pos.setZ(i, scale * (ref + (d - ref) * relief));
+    const b = B[y0*gw+x0]*(1-ax)*(1-ay) + B[y0*gw+x1]*ax*(1-ay) + B[y1*gw+x0]*(1-ax)*ay + B[y1*gw+x1]*ax*ay;
+    // 全体は ref の位置まで飛び出し、その周りの凹凸だけ relief 倍にする。さらに人物の厚みをふくらませる
+    pos.setZ(i, scale * (ref + (d - ref) * relief) + inflate * b);
   }
   pos.needsUpdate = true;
   geo.computeBoundingBox();
@@ -667,7 +712,8 @@ function buildPhotoMesh(d, index){
   const back = new THREE.Mesh(geo, makeMaterial(tex, ref, true));
   back.raycast = () => {};       // 裏の影はつかめないようにする
   mesh.add(back);
-  Object.assign(mesh.userData, { back, G, M, gw, gh, ref, smoothR: null });
+  const B = computeBulge(M, gw, gh, h);
+  Object.assign(mesh.userData, { back, G, M, B, gw, gh, ref, smoothR: null });
 
   applyGeometry(mesh);
   setCut(mesh, $('cutDefault').checked);
