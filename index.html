@@ -58,7 +58,6 @@
     <label>切り抜きAI
       <select id="cutModel">
         <option value="rmbg">標準（RMBG・おすすめ）</option>
-        <option value="birefnet">高精度（BiRefNet・重い）</option>
         <option value="modnet">軽量（MODNet）</option>
       </select>
     </label>
@@ -98,7 +97,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { ARButton } from 'three/addons/webxr/ARButton.js';
-import { pipeline, AutoModel, AutoProcessor, RawImage } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
+import { pipeline } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
 
 window.appStarted = true;
 const $ = id => document.getElementById(id);
@@ -126,8 +125,8 @@ const PARAMS = [
 ];
 const STORE_KEY = 'popPhotoSettings.v3';
 const RUN_KEY = 'popPhotoRunning';   // 切り抜き中に落ちたかどうかの目印
-const CUT_NAMES = { rmbg:'標準（RMBG）', birefnet:'高精度（BiRefNet）', modnet:'軽量（MODNet）' };
-const LIGHTER = { birefnet:'rmbg', rmbg:'modnet', modnet:'modnet' };
+const CUT_NAMES = { rmbg:'標準（RMBG）', modnet:'軽量（MODNet）' };
+const LIGHTER = { rmbg:'modnet', modnet:'modnet' };
 const settings = {};
 for (const p of PARAMS) settings[p.key] = p.def;
 let savedCutModel = null;
@@ -251,20 +250,7 @@ async function loadDepthModel(){
     { progress_callback: onDownloadProgress });
 }
 
-const BIREF_ID = 'onnx-community/BiRefNet_lite-ONNX';
 const cutModels = {};
-let forceWasm = false;
-
-async function pickDevice(){
-  if (forceWasm || !navigator.gpu) return { device:'wasm', dtype:'fp32' };
-  try {
-    const ad = await navigator.gpu.requestAdapter();
-    if (!ad) return { device:'wasm', dtype:'fp32' };
-    return { device:'webgpu', dtype: ad.features.has('shader-f16') ? 'fp16' : 'fp32' };
-  } catch (e) {
-    return { device:'wasm', dtype:'fp32' };
-  }
-}
 
 async function loadCutModel(kind){
   if (cutModels[kind]) return cutModels[kind];
@@ -287,36 +273,7 @@ async function loadCutModel(kind){
     };
     return cutModels.rmbg;
   }
-  // 高精度：BiRefNet lite（GPUが使えればGPU、だめならCPU）
-  // CPU（wasm）だと重すぎてブラウザが落ちるので、GPU（WebGPU）が使えるときだけ動かす
-  const first = await pickDevice();
-  if (first.device !== 'webgpu') throw new Error('このブラウザではGPU（WebGPU）が使えないため');
-  const tries = [first];
-  let lastErr;
-  for (const t of tries){
-    try {
-      status.textContent = `切り抜きAI（高精度・${t.device === 'webgpu' ? 'GPU' : 'CPU'}）を準備中…初回は100〜230MBのダウンロードがあります`;
-      const model = await AutoModel.from_pretrained(BIREF_ID,
-        { device:t.device, dtype:t.dtype, progress_callback: onDownloadProgress });
-      const proc = await AutoProcessor.from_pretrained(BIREF_ID, { progress_callback: onDownloadProgress });
-      cutModels.birefnet = {
-        name: `高精度（BiRefNet・${t.device === 'webgpu' ? 'GPU' : 'CPU'}）`,
-        device: t.device,
-        run: async (file) => {
-          const image = await RawImage.fromBlob(file);
-          const { pixel_values } = await proc(image);
-          const out = await model({ input_image: pixel_values });
-          const ten = out.output_image ?? Object.values(out)[0];
-          return RawImage.fromTensor(ten[0].sigmoid().mul(255).to('uint8'));
-        }
-      };
-      return cutModels.birefnet;
-    } catch (e) {
-      lastErr = e;
-      if (t.device === 'webgpu') forceWasm = true;
-    }
-  }
-  throw lastErr;
+  throw new Error('不明な切り抜きAI：' + kind);
 }
 
 const markRunning = kind => { try { kind ? localStorage.setItem(RUN_KEY, kind) : localStorage.removeItem(RUN_KEY); } catch (e) {} };
