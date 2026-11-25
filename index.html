@@ -71,7 +71,7 @@
     <button id="resetTune" style="margin-top:6px">初期値に戻す</button>
   </details>
   <div class="help">
-    <b>Colabで作った「〜_pop.png」を選ぶと、AIを使わずに高精細の切り抜き・奥行きのまま読み込みます</b>（普通の写真と混ぜて選んでもOK）<br>
+    <b>PNGはすべてColabで作ったデータとして、AIを使わずに高精細の切り抜き・奥行きのまま読み込みます</b>（JPGなど普通の写真と混ぜて選んでもOK）<br>
     片手トリガー：つかんで移動 ／ 両手トリガー：広げて拡大縮小 ／ つかんでスティック上下：微調整<br>
     写真に手を近づけると、手から前に伸びる楕円の範囲だけ写真が透けます（調整パネルで太さ・長さを変更、太さ0で無効）<br>
     つかんで A・X：その写真の切り抜き切替 ／ B・Y：全部の切り抜き切替<br>
@@ -555,13 +555,12 @@ function applyLook(){
 //  ・Colabで作った「〜_pop.png」 → AIを使わず、中のデータをそのまま使う
 //     左半分＝写真、右半分＝ 赤:奥行き上位8bit / 緑:奥行き下位8bit / 青:切り抜き
 // =====================================================================
-// ファイル名が変わっていても見分けられるように、中身の目印（Colabが書き込む「pop-photo-room」）も確認する
+// PNGはすべて Colabで作ったデータとして扱う（ファイル名が変わっていても中身で判定）
 async function isPopFile(f){
-  if (/_pop\b/i.test(f.name)) return true;   // 「〜_pop.png」「〜_pop (1).png」なども
+  if (/\.png$/i.test(f.name) || f.type === 'image/png') return true;
   try {
-    const head = new Uint8Array(await f.slice(0, 65536).arrayBuffer());
-    const isPng = head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4E && head[3] === 0x47;
-    return isPng && new TextDecoder('latin1').decode(head).includes('pop-photo-room');
+    const head = new Uint8Array(await f.slice(0, 8).arrayBuffer());
+    return head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4E && head[3] === 0x47;
   } catch (e) {
     return false;
   }
@@ -594,7 +593,7 @@ async function readPopFile(file, label){
   let img;
   try { img = await loadImage(url); } finally { URL.revokeObjectURL(url); }
   const W = Math.floor(img.width / 2), H = img.height;
-  if (W < 2 || img.width !== W * 2) throw new Error('Colabで作った _pop.png ではないようです（横幅が合いません）');
+  if (W < 2 || img.width !== W * 2) throw new Error('PNGはColabで作ったデータとして読み込みますが、この画像は形が合いません。普通の写真はJPGで選んでください');
 
   // 右半分（奥行き＋切り抜き）を読む
   const rc = document.createElement('canvas');
