@@ -111,7 +111,7 @@ renderer.xr.enabled = true;
 renderer.xr.setFramebufferScaleFactor(1.5);
 renderer.xr.setFoveation(0);
 document.body.appendChild(renderer.domElement);
-document.body.appendChild(ARButton.create(renderer, { optionalFeatures:['local-floor'] }));
+document.body.appendChild(ARButton.createButton(renderer, { optionalFeatures:['local-floor'] }));
 
 const MAX_TEX = Math.min(renderer.capabilities.maxTextureSize, 4096);
 const ANISO = renderer.capabilities.getMaxAnisotropy();
@@ -373,4 +373,3 @@ addEventListener('resize', () => {
 </script>
 </body>
 </html>
-
