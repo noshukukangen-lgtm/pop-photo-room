@@ -1,0 +1,270 @@
+# loop_tool.py — 長い動画から場面を選んで、ループする短い透過動画（WebM）を作る（Colab用）
+#
+# 使い方（Colabのセルで）:
+#   !curl -sL https://raw.githubusercontent.com/noshukukangen-lgtm/pop-photo-room/main/colab/loop_tool.py -o /content/loop_tool.py
+#   import sys, importlib; sys.path.insert(0, '/content'); import loop_tool; importlib.reload(loop_tool); loop_tool.start()
+#
+# ・動画は マイドライブ/kirinuki/input_videos に入れる
+# ・ファイル名の最後に「@1分23秒」「@1時間2分3秒」「@1-23」のように書いておくと、その時間ですぐ作れる
+# ・書いていなければ、サムネイル（1分ごと → 前後1分を2秒ごと）で場面を選ぶ
+# ・選んだ時間の前後から、最初と最後がいちばん似ている2〜5秒を自動で探して切り出す
+# ・できたものは マイドライブ/kirinuki/output_loops に「〜_loop.webm」（背景透明）で保存
+import os, re, json, subprocess, shutil, tempfile, base64, io
+from concurrent.futures import ThreadPoolExecutor
+import numpy as np
+import ipywidgets as W
+from IPython.display import display, HTML
+from PIL import Image
+
+BASE = '/content/drive/MyDrive/kirinuki'
+IN_DIR = f'{BASE}/input_videos'
+OUT_DIR = f'{BASE}/output_loops'
+LONG_SIDE = 1280        # 出力の長辺（Questで軽く再生できる大きさ）
+FPS = 24                # 出力のコマ数
+MIN_LEN, MAX_LEN = 2.0, 5.0   # ループの長さ（秒）
+SEARCH = 4.0            # 選んだ時間の前後、何秒の中から探すか
+FADE = 8                # 終わりを最初に溶け込ませるコマ数
+VIDEO_EXT = ('.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi')
+
+
+def _mount():
+    if not os.path.isdir('/content/drive/MyDrive'):
+        from google.colab import drive
+        drive.mount('/content/drive')
+    os.makedirs(IN_DIR, exist_ok=True)
+    os.makedirs(OUT_DIR, exist_ok=True)
+
+
+def duration(path):
+    r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', path],
+                       capture_output=True, text=True)
+    return float(json.loads(r.stdout)['format']['duration'])
+
+
+def thumb(path, t, w=200):
+    r = subprocess.run(['ffmpeg', '-v', 'error', '-ss', f'{t:.2f}', '-i', path, '-frames:v', '1',
+                        '-vf', f'scale={w}:-2', '-f', 'image2', '-c:v', 'mjpeg', '-q:v', '5', 'pipe:1'],
+                       capture_output=True)
+    return r.stdout
+
+
+def thumbs(path, times):
+    with ThreadPoolExecutor(8) as ex:
+        return list(ex.map(lambda t: thumb(path, t), times))
+
+
+def fmt(t):
+    t = int(round(float(t)))
+    h, m, s = t // 3600, (t % 3600) // 60, t % 60
+    return f'{h}:{m:02d}:{s:02d}' if h else f'{m}:{s:02d}'
+
+
+def time_from_name(name):
+    """ファイル名の最後の「@1分23秒」「@1時間2分3秒」「@83秒」「@1-23」「@1-02-03」を秒にする"""
+    n = os.path.splitext(name)[0]
+    m = re.search(r'@(?:(\d+)時間)?(?:(\d+)分)?(?:(\d+(?:\.\d+)?)秒)?$', n)
+    if m and any(m.groups()):
+        h, mi, s = (float(x) if x else 0.0 for x in m.groups())
+        return h * 3600 + mi * 60 + s
+    m = re.search(r'@(\d+)[:\-_](\d{1,2})(?:[:\-_](\d{1,2}))?$', n)
+    if m:
+        a, b, c = m.groups()
+        return int(a) * 3600 + int(b) * 60 + int(c) if c else int(a) * 60 + int(b)
+    return None
+
+
+def frame_size(path, t, w):
+    """幅 w にしたときの高さ（縦動画の回転も ffmpeg に任せる）"""
+    return Image.open(io.BytesIO(thumb(path, t, w))).size
+
+
+def read_frames(path, start, length, w, fps):
+    w, h = frame_size(path, start, w)
+    r = subprocess.run(['ffmpeg', '-v', 'error', '-ss', f'{start:.3f}', '-t', f'{length:.3f}', '-i', path,
+                        '-vf', f'scale={w}:{h},fps={fps}', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
+                       capture_output=True)
+    n = len(r.stdout) // (w * h * 3)
+    return np.frombuffer(r.stdout[:n * w * h * 3], np.uint8).reshape(n, h, w, 3)
+
+
+def find_loop(path, t, dur):
+    """選んだ時間 t の近くで、最初と最後のコマがいちばん似ている区間を探す"""
+    f = 12
+    s = max(0.0, t - SEARCH - MAX_LEN / 2)
+    e = min(dur, t + SEARCH + MAX_LEN / 2)
+    fr = read_frames(path, s, e - s, 160, f).astype(np.float32).mean(-1)
+    n = len(fr)
+    lo, hi = int(MIN_LEN * f), int(MAX_LEN * f)
+    if n <= lo:
+        return s, max(0.5, n / f), 0.0
+    best = None
+    for i in range(n):
+        for j in range(i + lo, min(n, i + hi + 1)):
+            d = float(np.abs(fr[i] - fr[j]).mean())
+            mid = s + (i + j) / 2 / f
+            cost = d + 0.5 * abs(mid - t)      # 似ているほど・選んだ時間に近いほど良い
+            if best is None or cost < best[0]:
+                best = (cost, i, j, d)
+    _, i, j, d = best
+    return s + i / f, (j - i) / f, d
+
+
+_rvm = None
+def _model():
+    global _rvm
+    if _rvm is None:
+        import torch
+        _rvm = torch.hub.load('PeterL1n/RobustVideoMatting', 'resnet50').eval().cuda()
+    return _rvm
+
+
+def matte(frames):
+    """人物の切り抜き（透明度）。ループなので2周して、2周目の結果を使う（つなぎ目でも安定）"""
+    import torch
+    m = _model()
+    h, w = frames.shape[1:3]
+    ds = min(1.0, 512 / max(h, w))
+    rec = [None] * 4
+    with torch.no_grad():
+        for _ in range(2):
+            out = []
+            for fr in frames:
+                x = torch.from_numpy(fr).cuda().permute(2, 0, 1)[None].float() / 255
+                fgr, pha, *rec = m(x, *rec, ds)
+                out.append((pha[0, 0].clamp(0, 1) * 255).byte().cpu().numpy())
+    return np.stack(out)
+
+
+def loop_blend(rgb, a, k=FADE):
+    """終わりの数コマを、最初のコマにじわっと溶け込ませる"""
+    rgb = rgb.astype(np.float32)
+    a = a.astype(np.float32)
+    n = len(rgb)
+    k = min(k, n // 3)
+    for q in range(k):
+        wgt = (q + 1) / (k + 1)
+        i = n - k + q
+        rgb[i] = rgb[i] * (1 - wgt) + rgb[0] * wgt
+        a[i] = a[i] * (1 - wgt) + a[0] * wgt
+    return rgb.clip(0, 255).astype(np.uint8), a.clip(0, 255).astype(np.uint8)
+
+
+def encode(rgb, a, out):
+    tmp = tempfile.mkdtemp()
+    try:
+        for i, (c, al) in enumerate(zip(rgb, a)):
+            Image.fromarray(np.dstack([c, al]), 'RGBA').save(f'{tmp}/{i:05d}.png', compress_level=1)
+        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-framerate', str(FPS), '-i', f'{tmp}/%05d.png',
+                        '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '28',
+                        '-row-mt', '1', '-auto-alt-ref', '0', '-an', out], check=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def make(path, t, log, box):
+    dur = duration(path)
+    log(f'{fmt(t)} の前後で、きれいにループする区間を探しています…')
+    s, L, d = find_loop(path, t, dur)
+    log(f'{fmt(s)} から {L:.1f} 秒を使います（つなぎ目の差 {d:.1f}、小さいほどなめらか）')
+    w0, h0 = frame_size(path, s, 64)
+    width = LONG_SIDE if w0 >= h0 else int(round(LONG_SIDE * w0 / h0 / 2) * 2)
+    frames = read_frames(path, s, L, width, FPS)
+    log(f'人物を切り抜いています…（{len(frames)} コマ）')
+    a = matte(frames)
+    rgb, a = loop_blend(frames, a)
+    stem = os.path.splitext(os.path.basename(path))[0].split('@')[0]
+    out = os.path.join(OUT_DIR, f'{stem}_{fmt(s).replace(":", "-")}_loop.webm')
+    log('動画にしています…')
+    encode(rgb, a, out)
+    Image.fromarray(np.dstack([rgb[0], a[0]]), 'RGBA').save(out.replace('_loop.webm', '_loop_first.png'))
+    log(f'完了しました：{out}')
+    b64 = base64.b64encode(open(out, 'rb').read()).decode()
+    with box:
+        display(HTML(
+            '<div style="display:inline-block;padding:8px;'
+            'background:repeating-conic-gradient(#bbb 0 25%,#eee 0 50%) 0 0/20px 20px">'
+            f'<video src="data:video/webm;base64,{b64}" autoplay loop muted playsinline '
+            'style="max-width:480px;max-height:480px;display:block"></video></div>'))
+
+
+def start():
+    _mount()
+    try:
+        from google.colab import output
+        output.enable_custom_widget_manager()
+    except Exception:
+        pass
+    vids = sorted(f for f in os.listdir(IN_DIR) if f.lower().endswith(VIDEO_EXT))
+    if not vids:
+        print(f'{IN_DIR} に動画を入れてから、もう一度実行してください')
+        return
+
+    dd = W.Dropdown(options=vids, description='動画', layout=W.Layout(width='560px'))
+    go = W.Button(description='サムネイルを出す', button_style='primary')
+    name_btn = W.Button(button_style='success', layout=W.Layout(width='300px'))
+    area = W.VBox()
+    box = W.Output()
+
+    def log(m):
+        with box:
+            print(m)
+
+    def path():
+        return os.path.join(IN_DIR, dd.value)
+
+    def on_dd(_=None):
+        t = time_from_name(dd.value)
+        name_btn.layout.display = 'none' if t is None else ''
+        if t is not None:
+            name_btn.description = f'ファイル名の時間（{fmt(t)}）で作る'
+    dd.observe(on_dd, 'value')
+    on_dd()
+
+    def grid(times, imgs, on_pick):
+        cells = []
+        for t, b in zip(times, imgs):
+            img = W.Image(value=b or b'', format='jpeg', layout=W.Layout(width='160px'))
+            btn = W.Button(description=fmt(t), layout=W.Layout(width='160px'))
+            btn.on_click(lambda _, t=float(t): on_pick(t))
+            cells.append(W.VBox([img, btn]))
+        return W.GridBox(cells, layout=W.Layout(grid_template_columns='repeat(6, 170px)'))
+
+    def level1(_=None):
+        p = path()
+        dur = duration(p)
+        long = dur > 120
+        area.children = [W.HTML('サムネイルを作っています…')]
+        times = list(np.arange(0, dur, 60.0 if long else 2.0))
+        imgs = thumbs(p, times)
+        msg = '1分ごと。近い場面をクリックすると、前後1分を2秒ごとに出します' if long else '2秒ごと。欲しい場面をクリック'
+        area.children = [W.HTML(f'<b>{dd.value}</b>（{fmt(dur)}）：{msg}'), grid(times, imgs, level2 if long else confirm)]
+
+    def level2(t):
+        p = path()
+        dur = duration(p)
+        area.children = [W.HTML(f'{fmt(t)} の前後のサムネイルを作っています…')]
+        times = list(np.arange(max(0.0, t - 60), min(dur, t + 60), 2.0))
+        imgs = thumbs(p, times)
+        back = W.Button(description='← 戻る')
+        back.on_click(level1)
+        area.children = [W.HBox([back, W.HTML(f'　{fmt(times[0])}〜{fmt(times[-1])}：2秒ごと。欲しい場面をクリック')]),
+                         grid(times, imgs, confirm)]
+
+    def confirm(t):
+        p = path()
+        big = W.Image(value=thumb(p, t, 640), format='jpeg', layout=W.Layout(width='480px'))
+        ok = W.Button(description='この場面で作る', button_style='success', layout=W.Layout(width='240px'))
+        back = W.Button(description='← 選び直す')
+        back.on_click(lambda _: level2(t) if duration(p) > 120 else level1())
+        ok.on_click(lambda _: run(t))
+        area.children = [W.HTML(f'<b>{fmt(t)}</b> の場面'), big, W.HBox([ok, back])]
+
+    def run(t):
+        try:
+            make(path(), t, log, box)
+        except Exception as e:
+            log(f'失敗しました：{e}')
+
+    go.on_click(level1)
+    name_btn.on_click(lambda _: run(time_from_name(dd.value)))
+    display(W.VBox([W.HBox([dd, go, name_btn]), area, box]))
