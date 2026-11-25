@@ -98,8 +98,8 @@ async function readPopFile(file, label){
 //   全身の写真は、床を認識していれば足を床にぴったり立たせる
 // =====================================================================
 const EYE_FALLBACK = 1.5;   // まだVRに入っていないときの目の高さ（m）
-const GAP = 0.35;           // 写真どうしのすき間（m）
-const MIN_RADIUS = 1.8;     // 自分からの距離（m）
+const GAP = 0.2;            // 写真どうしのすき間（m）
+const MIN_RADIUS = 1.0;     // 自分からの距離（m）
 
 // 切り抜きの範囲から「人の大きさ」を決める（top・bottom は写真の中での高さ）
 A.personLayout = (M, gw, gh, w, h) => {
