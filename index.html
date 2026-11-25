@@ -21,6 +21,7 @@
   summary{cursor:pointer;font-size:14px;color:#9cf}
   .help{font-size:12px;color:#aaa;line-height:1.6;margin-top:6px}
   select,button{font-size:14px}
+  .pick{display:inline-block;margin-right:16px;font-size:14px}
 </style>
 <script>
   // ===== エラーを画面下に赤く表示 =====
@@ -54,7 +55,8 @@
 </head>
 <body>
 <div id="ui">
-  <input type="file" id="files" accept="image/*" multiple>
+  <label class="pick">写真 <input type="file" id="files" accept="image/*" multiple></label>
+  <label class="pick">ループ動画（〜_loop.webm） <input type="file" id="videos" accept="video/webm,video/*" multiple></label>
   <div style="margin-top:8px">
     <label>切り抜きAI
       <select id="cutModel">
@@ -73,14 +75,15 @@
   </details>
   <div class="help">
     <b>PNGはすべてColabで作ったデータとして、AIを使わずに高精細の切り抜き・奥行きのまま読み込みます</b>（JPGなど普通の写真と混ぜて選んでもOK）<br>
+    <b>ループ動画</b>：Colabの loop_tool で作った「〜_loop.webm」を選ぶと、立体の写真と同じように置けて、ずっとくり返し再生されます<br>
     片手トリガー：つかんで移動 ／ 両手トリガー：広げて拡大縮小 ／ つかんでスティック上下：微調整<br>
     写真に手を近づけると、手から前に伸びる楕円の範囲だけ写真が透けます（調整パネルで太さ・長さを変更、太さ0で無効）<br>
     つかんで A・X：その写真の切り抜き切替 ／ B・Y：全部の切り抜き切替<br>
     <b>スティック押し込み：調整パネル ／ つかんだままスティック押し込み：その写真を削除</b><br>
     VRに入ると、写真は人の大きさで自分の前に並びます。<b>大きさは、写真の中で一番大きい顔が実物大になるように決めます</b>（顔が見つからない写真は、全身1.6m・上半身0.9m）。全身の写真は床に立ちます（調整パネルの「取り囲む」でいつでも並べ直し）<br>
-    <b>写真はゆっくりこちらを向きます</b>（調整パネルの「こっちを向く」で強さを変更、0%で止まります。壁・床・天井に貼った写真は回りません）<br>
+    <b>写真はゆっくりこちらを向きます</b>（調整パネルの「こっちを向く」で強さを変更、0%で止まります。壁・床・天井に貼った写真は回りません）。写真の人は、呼吸するように少しだけ動きます<br>
     <b>壁・床・天井の近くで、光線が緑になったところで離すと、ピタッと吸い付きます</b>（Questの設定で部屋のスキャンが必要。最初に空間データの許可を聞かれたら「許可」）<br>
-    <b>写真と置いた場所は、このブラウザの中に自動で保存されます</b>（ネットには上がりません）。次に開くと、前に置いた場所に戻ります。消すときは調整パネルの「全部消す」か、つかんでスティック押し込み
+    <b>写真・動画と置いた場所は、このブラウザの中に自動で保存されます</b>（ネットには上がりません）。次に開くと、前に置いた場所に戻ります。消すときは調整パネルの「全部消す」か、つかんでスティック押し込み
   </div>
   <div id="status">読み込み中…</div>
   <div id="log"></div>
@@ -113,6 +116,8 @@ import './js/xr.js';
 import './js/storage.js';
 import './js/face.js';
 import './js/follow.js';
+import './js/video.js';
+import './js/idle.js';
 window.appStarted = true;
 </script>
 </body>
