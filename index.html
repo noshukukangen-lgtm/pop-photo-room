@@ -14,6 +14,35 @@
   .fill{height:100%;width:0%;background:linear-gradient(90deg,#0cf,#6f6);transition:width .2s}
   .hidden{display:none}
 </style>
+<script>
+  // ===== エラーを画面下に赤く表示 =====
+  window.appStarted = false;
+  function showErr(msg){
+    let box = document.getElementById('errBox');
+    if (!box){
+      box = document.createElement('div');
+      box.id = 'errBox';
+      box.style.cssText = 'position:fixed;bottom:0;left:0;right:0;max-height:40%;overflow:auto;' +
+        'background:#a00;color:#fff;font:13px monospace;padding:10px;z-index:9999;white-space:pre-wrap';
+      document.body.appendChild(box);
+    }
+    box.textContent += '⚠ ' + msg + '\n';
+  }
+  window.addEventListener('error', e => {
+    const where = e.filename ? `（${e.filename.split('/').pop()} ${e.lineno}行目）` : '';
+    showErr((e.message || '部品の読み込みに失敗しました') + where);
+  }, true);
+  window.addEventListener('unhandledrejection', e => {
+    showErr(e.reason && (e.reason.stack || e.reason.message) || String(e.reason));
+  });
+  window.addEventListener('load', () => {
+    setTimeout(() => {
+      if (!window.appStarted){
+        showErr('プログラムが起動していません（部品の読み込みに失敗したか、このブラウザが未対応の可能性）');
+      }
+    }, 10000);
+  });
+</script>
 </head>
 <body>
 <div id="ui">
@@ -24,7 +53,7 @@
     <button id="cutAllOn">全部 切り抜きON</button>
     <button id="cutAllOff">全部 切り抜きOFF</button>
   </div>
-  <div id="status">写真を選んでください（何枚でもOK）。準備ができたら下の「START AR」を押します。</div>
+  <div id="status">読み込み中…</div>
 
   <div id="dlBox" class="bar hidden">
     <span id="dlText">AIをダウンロード中… 0%</span>
@@ -48,8 +77,10 @@ import * as THREE from 'three';
 import { ARButton } from 'three/addons/webxr/ARButton.js';
 import { pipeline } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
 
+window.appStarted = true;
 const $ = id => document.getElementById(id);
 const status = $('status');
+status.textContent = '写真を選んでください（何枚でもOK）。準備ができたら下の「START AR」を押します。';
 
 // ===== プログレスバー =====
 function setBar(box, fill, text, ratio, label){
@@ -103,7 +134,12 @@ async function loadModels(){
 }
 
 function loadImage(url){
-  return new Promise(r => { const img = new Image(); img.onload = () => r(img); img.src = url; });
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('画像を読み込めませんでした（形式が未対応の可能性）'));
+    img.src = url;
+  });
 }
 
 function toTexture(canvas){
@@ -116,7 +152,6 @@ function toTexture(canvas){
   return tex;
 }
 
-// 元画像を高画質のままキャンバスへ
 function drawPhoto(img){
   let w = img.width, h = img.height;
   const k = Math.min(1, MAX_TEX / Math.max(w, h));
@@ -129,7 +164,6 @@ function drawPhoto(img){
   return cv;
 }
 
-// 切り抜きマスクを元画像サイズに合わせて透明度として適用
 function makeCutCanvas(photoCanvas, maskImage){
   const w = photoCanvas.width, h = photoCanvas.height;
   const maskSrc = maskImage.toCanvas();
@@ -218,7 +252,11 @@ $('files').addEventListener('change', async e => {
     }
     setBar('allBox','allFill','allText', i/n, `全体 ${i} / ${n} 枚 完了 ${eta}`);
     status.textContent = `${i+1} 枚目を立体化・切り抜き中…`;
-    await makePopPhoto(files[i], photos.length);
+    try {
+      await makePopPhoto(files[i], photos.length);
+    } catch (err) {
+      showErr(`${i+1} 枚目（${files[i].name}）で失敗：${err && err.message ? err.message : err}`);
+    }
   }
   setBar('allBox','allFill','allText', 1, `全体 ${n} / ${n} 枚 完了`);
   status.textContent = `合計 ${photos.length} 枚 準備完了。START AR を押してください。`;
@@ -294,7 +332,6 @@ const controllers = [0,1].map(i => {
   return c;
 });
 
-// ボタンを「押した瞬間」だけ反応させる
 function pressed(c, idx){
   const gp = c.userData.gamepad;
   const now = !!(gp && gp.buttons[idx] && gp.buttons[idx].pressed);
@@ -336,3 +373,4 @@ addEventListener('resize', () => {
 </script>
 </body>
 </html>
+
