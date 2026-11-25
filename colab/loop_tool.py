@@ -4,7 +4,10 @@
 #   !curl -sL https://raw.githubusercontent.com/noshukukangen-lgtm/pop-photo-room/main/colab/loop_tool.py -o /content/loop_tool.py
 #   import sys, importlib; sys.path.insert(0, '/content'); import loop_tool; importlib.reload(loop_tool); loop_tool.start()
 #
-# ・動画は マイドライブ/kirinuki/input_videos に入れる
+#   ドライブにつながずに使うときは、最後を loop_tool.start(upload=True) にする
+#   （その場で動画をアップロードして、できたループ動画はダウンロードされる。Googleドライブには一切さわらない）
+#
+# ・動画は マイドライブ/kirinuki/input_videos に入れる（upload=True のときは不要）
 # ・ファイル名の最後に「@1分23秒」「@1時間2分3秒」「@1-23」のように書いておくと、その時間ですぐ作れる
 # ・書いていなければ、サムネイル（1分ごと → 前後1分を2秒ごと）で場面を選ぶ
 # ・選んだ時間の前後から、最初と最後がいちばん似ている2〜5秒を自動で探して切り出す
@@ -25,6 +28,7 @@ MIN_LEN, MAX_LEN = 2.0, 5.0   # ループの長さ（秒）
 SEARCH = 4.0            # 選んだ時間の前後、何秒の中から探すか
 FADE = 8                # 終わりを最初に溶け込ませるコマ数
 VIDEO_EXT = ('.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi')
+UPLOAD = False
 
 
 def _mount():
@@ -33,6 +37,24 @@ def _mount():
         drive.mount('/content/drive')
     os.makedirs(IN_DIR, exist_ok=True)
     os.makedirs(OUT_DIR, exist_ok=True)
+
+
+def _upload():
+    """ドライブを使わず、その場で動画をアップロードする"""
+    global IN_DIR, OUT_DIR, UPLOAD
+    UPLOAD = True
+    IN_DIR, OUT_DIR = '/content/loop_in', '/content/loop_out'
+    os.makedirs(IN_DIR, exist_ok=True)
+    os.makedirs(OUT_DIR, exist_ok=True)
+    from google.colab import files
+    print('動画を選んでください（何本でもOK。前にアップロードした分も残っています）')
+    up = files.upload()
+    for name, data in up.items():
+        with open(os.path.join(IN_DIR, os.path.basename(name)), 'wb') as f:
+            f.write(data)
+        p = os.path.join('/content', name)
+        if os.path.exists(p):
+            os.remove(p)
 
 
 def duration(path):
@@ -178,6 +200,14 @@ def make(path, t, log, box):
     encode(rgb, a, out)
     Image.fromarray(np.dstack([rgb[0], a[0]]), 'RGBA').save(out.replace('_loop.webm', '_loop_first.png'))
     log(f'完了しました：{out}')
+    if UPLOAD:
+        try:
+            from google.colab import files
+            with box:
+                files.download(out)
+            log('ダウンロードを始めました（始まらなければ、左のフォルダの loop_out から右クリックでダウンロード）')
+        except Exception as e:
+            log(f'自動ダウンロードできませんでした：左のフォルダの loop_out から右クリックでダウンロードしてください（{e}）')
     b64 = base64.b64encode(open(out, 'rb').read()).decode()
     with box:
         display(HTML(
@@ -187,8 +217,11 @@ def make(path, t, log, box):
             'style="max-width:480px;max-height:480px;display:block"></video></div>'))
 
 
-def start():
-    _mount()
+def start(upload=False):
+    if upload:
+        _upload()
+    else:
+        _mount()
     try:
         from google.colab import output
         output.enable_custom_widget_manager()
@@ -196,7 +229,8 @@ def start():
         pass
     vids = sorted(f for f in os.listdir(IN_DIR) if f.lower().endswith(VIDEO_EXT))
     if not vids:
-        print(f'{IN_DIR} に動画を入れてから、もう一度実行してください')
+        print('動画がありません。もう一度実行して動画を選んでください' if upload
+              else f'{IN_DIR} に動画を入れてから、もう一度実行してください')
         return
 
     dd = W.Dropdown(options=vids, description='動画', layout=W.Layout(width='560px'))
