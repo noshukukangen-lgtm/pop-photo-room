@@ -36,11 +36,17 @@ function makeVideo(blob){
     const v = document.createElement('video');
     v.muted = true; v.loop = true; v.playsInline = true; v.preload = 'auto';
     v.src = URL.createObjectURL(blob);
+    // 30秒たっても再生の準備ができなければ、あきらめて理由を出す（大きすぎる・形式に未対応のとき、何も起きないことがある）
+    const timer = setTimeout(() => reject(new Error(
+      '30秒待っても動画を開けませんでした。このブラウザには大きすぎるか、形式（HEVC）に対応していない可能性があります。' +
+      'Colabで画質を「軽め（H.264）」にして作り直してください')), 30000);
     v.addEventListener('loadeddata', () => {
+      clearTimeout(timer);
       // 顔を見つける処理などが大きさを読めるように、元の大きさを設定しておく
       v.width = v.videoWidth; v.height = v.videoHeight;
       resolve(v);
     }, { once: true });
+    v.addEventListener('error', () => clearTimeout(timer), { once: true });
     v.addEventListener('error', () => reject(new Error(
       '動画を読み込めませんでした（形式が未対応の可能性。VR180なら、Colabで画質を「軽め（H.264）」にして作り直してみてください）')), { once: true });
   });
@@ -177,7 +183,10 @@ void main(){
 }`;
 
 async function loadVR180(file){
-  status.textContent = 'VR180の動画を開いています…';
+  status.textContent = 'VR180の動画を開いています…（30秒ほどかかることがあります）';
+  const probe = document.createElement('video');
+  const can = c => probe.canPlayType(`video/mp4; codecs="${c}"`) || 'いいえ';
+  A.note(`VR180：${file.name}（${(file.size / 1048576).toFixed(0)} MB）を開いています。HEVCの再生：${can('hvc1')}／H.264の再生：${can('avc1.640033')}`);
   const v = await makeVideo(file);
   clearVR180();
   // 型紙つきかどうか：名前に「packed」があるか、縦横比が 3:4 に近い（ふつうのVR180は 1:2）
