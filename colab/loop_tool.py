@@ -11,6 +11,7 @@
 # ・ファイル名の最後に「@1分23秒」「@1時間2分3秒」「@1-23」のように書いておくと、その時間ですぐ作れる
 # ・書いていなければ、サムネイル（1分ごと → 前後1分を2秒ごと）で場面を選ぶ
 # ・選んだ時間の前後から、最初と最後がいちばん似ている2〜5秒を自動で探して切り出す
+# ・VR180（左に左目・右に右目が並んだ動画）は、左右それぞれ人物を切り抜いて「〜_vr180_loop.webm」にする
 # ・できたものは マイドライブ/kirinuki/output_loops に「〜_loop.webm」（背景透明）で保存
 import os, re, json, subprocess, shutil, tempfile, base64, io
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +24,7 @@ BASE = '/content/drive/MyDrive/kirinuki'
 IN_DIR = f'{BASE}/input_videos'
 OUT_DIR = f'{BASE}/output_loops'
 LONG_SIDE = 1280        # 出力の長辺（Questで軽く再生できる大きさ）
+VR_LONG = 2880          # VR180の出力の横幅（左右合わせて。片目1440）
 FPS = 24                # 出力のコマ数
 MIN_LEN, MAX_LEN = 2.0, 5.0   # ループの長さ（秒）
 SEARCH = 4.0            # 選んだ時間の前後、何秒の中から探すか
@@ -151,7 +153,7 @@ def matte(frames):
         for _ in range(2):
             out = []
             for fr in frames:
-                x = torch.from_numpy(fr).cuda().permute(2, 0, 1)[None].float() / 255
+                x = torch.from_numpy(np.ascontiguousarray(fr)).cuda().permute(2, 0, 1)[None].float() / 255
                 fgr, pha, *rec = m(x, *rec, ds)
                 out.append((pha[0, 0].clamp(0, 1) * 255).byte().cpu().numpy())
     return np.stack(out)
@@ -183,19 +185,29 @@ def encode(rgb, a, out):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def make(path, t, log, box):
+def make(path, t, log, box, vr=False):
     dur = duration(path)
     log(f'{fmt(t)} の前後で、きれいにループする区間を探しています…')
     s, L, d = find_loop(path, t, dur)
     log(f'{fmt(s)} から {L:.1f} 秒を使います（つなぎ目の差 {d:.1f}、小さいほどなめらか）')
     w0, h0 = frame_size(path, s, 64)
-    width = LONG_SIDE if w0 >= h0 else int(round(LONG_SIDE * w0 / h0 / 2) * 2)
+    if vr:
+        width = VR_LONG
+    else:
+        width = LONG_SIDE if w0 >= h0 else int(round(LONG_SIDE * w0 / h0 / 2) * 2)
     frames = read_frames(path, s, L, width, FPS)
-    log(f'人物を切り抜いています…（{len(frames)} コマ）')
-    a = matte(frames)
+    if vr:
+        half = frames.shape[2] // 2
+        frames = np.ascontiguousarray(frames[:, :, :half * 2])
+        log(f'VR180：左目と右目をそれぞれ切り抜いています…（{len(frames)} コマ × 2）')
+        a = np.concatenate([matte(frames[:, :, :half]), matte(frames[:, :, half:])], axis=2)
+    else:
+        log(f'人物を切り抜いています…（{len(frames)} コマ）')
+        a = matte(frames)
     rgb, a = loop_blend(frames, a)
     stem = os.path.splitext(os.path.basename(path))[0].split('@')[0]
-    out = os.path.join(OUT_DIR, f'{stem}_{fmt(s).replace(":", "-")}_loop.webm')
+    tag = '_vr180' if vr else ''
+    out = os.path.join(OUT_DIR, f'{stem}_{fmt(s).replace(":", "-")}{tag}_loop.webm')
     log('動画にしています…')
     encode(rgb, a, out)
     Image.fromarray(np.dstack([rgb[0], a[0]]), 'RGBA').save(out.replace('_loop.webm', '_loop_first.png'))
@@ -236,6 +248,7 @@ def start(upload=False):
     dd = W.Dropdown(options=vids, description='動画', layout=W.Layout(width='560px'))
     go = W.Button(description='サムネイルを出す', button_style='primary')
     name_btn = W.Button(button_style='success', layout=W.Layout(width='300px'))
+    vrc = W.Checkbox(description='VR180（左に左目・右に右目が並んだ動画）', indent=False)
     area = W.VBox()
     box = W.Output()
 
@@ -251,6 +264,11 @@ def start(upload=False):
         name_btn.layout.display = 'none' if t is None else ''
         if t is not None:
             name_btn.description = f'ファイル名の時間（{fmt(t)}）で作る'
+        try:
+            w, h = frame_size(path(), 1, 64)
+            vrc.value = w >= 1.9 * h        # 横が縦の約2倍ならVR180とみなす（違えば外せる）
+        except Exception:
+            pass
     dd.observe(on_dd, 'value')
     on_dd()
 
@@ -295,10 +313,10 @@ def start(upload=False):
 
     def run(t):
         try:
-            make(path(), t, log, box)
+            make(path(), t, log, box, vrc.value)
         except Exception as e:
             log(f'失敗しました：{e}')
 
     go.on_click(level1)
     name_btn.on_click(lambda _: run(time_from_name(dd.value)))
-    display(W.VBox([W.HBox([dd, go, name_btn]), area, box]))
+    display(W.VBox([W.HBox([dd, go, name_btn]), vrc, area, box]))
