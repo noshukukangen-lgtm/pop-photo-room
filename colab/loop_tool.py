@@ -13,6 +13,7 @@
 # ・ループ：選んだ時間の前後から、最初と最後がいちばん似ている2〜5秒を自動で探して切り出す
 # ・長いまま：選んだ時間の前後1分ずつ（切り出しツールで作ったクリップなら全部）を、音声つきでそのまま切り抜く
 # ・VR180（左に左目・右に右目が並んだ動画）は、左右それぞれ人物を切り抜いて名前に「_vr180」を付ける
+#   VR180を長いままにすると、元の画質のまま「型紙つきの普通の動画（〜_vr180_packed.mp4）」にする
 import os, re, json, subprocess, shutil, tempfile, base64, io
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
@@ -298,6 +299,108 @@ def make_full(path, t, log, box, vr=False):
     _download(out, log, box)
 
 
+# =====================================================================
+# VR180を長いまま・高画質で：「型紙つき」の普通の動画（MP4）にする
+#   上 2/3：元の映像（左に左目・右に右目）
+#   下 1/3：人がいるところが白、背景が黒の型紙（縦だけ半分の細かさ）
+#   アプリがこの型紙で背景を消して表示する。普通の動画なので、Questが軽く再生できる
+# =====================================================================
+VR_MAX = 5760           # 元の画質のときの横幅の上限（左右合わせて。片目2880）
+VR_LIGHT = 2880         # 軽めのときの横幅
+VR_FPS_MAX = 30         # コマ数の上限（60コマの動画は30コマにする）
+
+
+def _probe(path):
+    r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                        '-show_entries', 'stream=width,height,r_frame_rate', '-of', 'json', path],
+                       capture_output=True, text=True)
+    st = json.loads(r.stdout)['streams'][0]
+    n, d = st['r_frame_rate'].split('/')
+    fps = float(n) / float(d) if float(d) else 30.0
+    return int(st['width']), int(st['height']), fps
+
+
+def _video_encoder(light, log):
+    if light:
+        log('動画の形式：H.264（どの機器でも再生しやすい）')
+        return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p']
+    t = subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=s=512x512:d=0.2',
+                        '-c:v', 'hevc_nvenc', '-f', 'null', '-'], capture_output=True)
+    if t.returncode == 0:
+        log('動画の形式：HEVC（GPUで高速に作ります）')
+        return ['-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr', '-cq', '22', '-b:v', '0',
+                '-pix_fmt', 'yuv420p', '-tag:v', 'hvc1']
+    log('動画の形式：HEVC（GPUのエンコーダが使えないので、少し時間がかかります）')
+    return ['-c:v', 'libx265', '-preset', 'fast', '-crf', '20', '-x265-params', 'log-level=error',
+            '-pix_fmt', 'yuv420p', '-tag:v', 'hvc1']
+
+
+def make_vr_packed(path, t, log, box, light=False, matte_fn=None):
+    dur = duration(path)
+    s = max(0.0, t - FULL_HALF)
+    L = min(dur, t + FULL_HALF) - s
+    W0, H0, fps0 = _probe(path)
+    fps = min(float(VR_FPS_MAX), fps0) if fps0 > 0 else 30.0
+    w = min(W0, VR_LIGHT if light else VR_MAX)
+    w = (w // 4) * 4
+    h = int(round(w * H0 / W0 / 4)) * 4
+    half, hm = w // 2, h // 2
+    stem = os.path.splitext(os.path.basename(path))[0].split('@')[0]
+    out = os.path.join(OUT_DIR, f'{stem}_{fmt(s).replace(":", "-")}_vr180_packed.mp4')
+    total = int(L * fps)
+    log(f'{fmt(s)} から {L:.0f} 秒を、{w}×{h}・{fps:.0f}コマで切り抜きます（{total} コマ × 左右2。20分以上かかることがあります）')
+
+    dec = subprocess.Popen(['ffmpeg', '-v', 'error', '-ss', f'{s:.3f}', '-t', f'{L:.3f}', '-i', path,
+                            '-vf', f'scale={w}:{h}:flags=lanczos,fps={fps}', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
+                           stdout=subprocess.PIPE)
+    enc = subprocess.Popen(['ffmpeg', '-v', 'error', '-y',
+                            '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{w}x{h + hm}', '-framerate', f'{fps}', '-i', 'pipe:0',
+                            '-ss', f'{s:.3f}', '-t', f'{L:.3f}', '-i', path,
+                            '-map', '0:v', '-map', '1:a?'] + _video_encoder(light, log) +
+                           ['-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-shortest', out],
+                           stdin=subprocess.PIPE)
+    if matte_fn is None:
+        import torch
+        m = _model()
+        ds = min(1.0, 512 / max(h, half))
+        recs = [[None] * 4, [None] * 4]
+
+        def matte_fn(k, p):
+            x = torch.from_numpy(np.ascontiguousarray(p)).cuda().permute(2, 0, 1)[None].float() / 255
+            with torch.no_grad():
+                res = m(x, *recs[k], ds)
+            recs[k] = list(res[2:])
+            return (res[1][0, 0].clamp(0, 1) * 255).byte().cpu().numpy()
+
+    fb = w * h * 3
+    n = 0
+    try:
+        while True:
+            buf = dec.stdout.read(fb)
+            if len(buf) < fb:
+                break
+            fr = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+            a = np.concatenate([matte_fn(0, fr[:, :half]), matte_fn(1, fr[:, half:])], axis=1)
+            am = ((a[0::2].astype(np.uint16) + a[1::2]) // 2).astype(np.uint8)       # 縦だけ半分に
+            packed = np.concatenate([fr, np.repeat(am[:, :, None], 3, axis=2)], axis=0)
+            if n == 0:
+                p = Image.fromarray(np.dstack([fr, a]), 'RGBA')
+                p.thumbnail((1440, 1440))
+                p.save(out.replace('_packed.mp4', '_packed_first.png'))
+            enc.stdin.write(packed.tobytes())
+            n += 1
+            if n % int(fps * 10) == 0:
+                log(f'  {n / fps:.0f} / {L:.0f} 秒 まで切り抜きました')
+    finally:
+        enc.stdin.close()
+        enc.wait()
+        dec.wait()
+    if enc.returncode != 0:
+        raise RuntimeError('動画を書き出せませんでした（上に英語のエラーが出ていたら教えてください）')
+    log(f'完了しました：{out}（{os.path.getsize(out) / 1048576:.0f} MB）')
+    _download(out, log, box)
+
+
 def start(upload=False):
     if upload:
         _upload()
@@ -319,6 +422,8 @@ def start(upload=False):
     name_btn = W.Button(button_style='success', layout=W.Layout(width='300px'))
     vrc = W.Checkbox(description='VR180（左に左目・右に右目が並んだ動画）', indent=False)
     full = W.Checkbox(description='長いまま（ループにしない。選んだ時間の前後1分ずつ・音声つき）', indent=False)
+    qual = W.Dropdown(options=[('元の画質（HEVC・横最大5760）', 'orig'), ('軽め（H.264・横2880。元の画質がカクつくとき）', 'light')],
+                      description='VR180の画質', style={'description_width': 'initial'}, layout=W.Layout(width='560px'))
     area = W.VBox()
     box = W.Output()
 
@@ -328,6 +433,11 @@ def start(upload=False):
 
     def path():
         return os.path.join(IN_DIR, dd.value)
+
+    def on_opts(_=None):
+        qual.layout.display = '' if (vrc.value and full.value) else 'none'
+    vrc.observe(on_opts, 'value')
+    full.observe(on_opts, 'value')
 
     def on_dd(_=None):
         t = time_from_name(dd.value)
@@ -340,6 +450,7 @@ def start(upload=False):
             full.value = vrc.value          # VR180は最初から「長いまま」
         except Exception:
             pass
+        on_opts()
     dd.observe(on_dd, 'value')
     on_dd()
 
@@ -384,7 +495,9 @@ def start(upload=False):
 
     def run(t):
         try:
-            if full.value:
+            if full.value and vrc.value:
+                make_vr_packed(path(), t, log, box, qual.value == 'light')
+            elif full.value:
                 make_full(path(), t, log, box, vrc.value)
             else:
                 make(path(), t, log, box, vrc.value)
@@ -393,4 +506,4 @@ def start(upload=False):
 
     go.on_click(level1)
     name_btn.on_click(lambda _: run(time_from_name(dd.value)))
-    display(W.VBox([W.HBox([dd, go, name_btn]), vrc, full, area, box]))
+    display(W.VBox([W.HBox([dd, go, name_btn]), vrc, full, qual, area, box]))
