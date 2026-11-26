@@ -2,8 +2,8 @@
 //   ・奥行きは最初のコマからブラウザのAIで作る（動きが小さいので1枚分で十分）
 //   ・切り抜きは動画そのものの透明度を使う
 //   ・動画はこのブラウザの中に保存し、次に開いたときも動く（ネットには上がりません）
-//   ・「〜_vr180_loop.webm」（左に左目・右に右目）は、自分を囲む半球に左右の目それぞれ映す
-//     （撮ったときのカメラ位置から見る形。つかんで動かすことはできない）
+//   ・名前に「vr180」が入った動画（左に左目・右に右目）は、自分を囲む半球に左右の目それぞれ映す
+//     （撮ったときのカメラ位置から見る形。つかんで動かすことはできない。音も出す）
 import * as THREE from 'three';
 
 const A = window.APP;
@@ -138,6 +138,12 @@ function clearVR180(){
 }
 A.clearVR180 = clearVR180;
 
+// 音を出して再生（ブラウザに止められたら、音なしで再生）
+function playWithSound(v){
+  v.muted = false;
+  v.play().catch(() => { v.muted = true; v.play().catch(() => {}); });
+}
+
 async function loadVR180(file){
   status.textContent = 'VR180の動画を開いています…';
   const v = await makeVideo(file);
@@ -164,8 +170,10 @@ async function loadVR180(file){
   });
   A.scene.add(group);
   vr = { group, v, tex, needYaw: true };
+  // VRに入る前は音なしで。VRに入ったら最初から音つきで流す
   v.play().catch(() => {});
-  status.textContent = 'VR180の動画を読み込みました。START AR を押すと、撮ったときの位置に人が見えます。';
+  if (renderer.xr.isPresenting){ v.currentTime = 0; playWithSound(v); }
+  status.textContent = 'VR180の動画を読み込みました。START AR を押すと、撮ったときの位置に人が見えます（音も出ます）。';
   A.note('VR180の動画を読み込みました（左右の目で別々に表示）');
 }
 
@@ -184,10 +192,14 @@ renderer.render = (scene, cam) => {
   origRender(scene, cam);
 };
 
-// VRに入ったとき、止まっている動画があれば再生し直す
+// VRに入ったとき、止まっている動画があれば再生し直す。VR180は最初から音つきで
 renderer.xr.addEventListener('sessionstart', () => {
   for (const m of photos) if (m.userData.video) m.userData.video.play().catch(() => {});
-  if (vr){ vr.v.play().catch(() => {}); vr.needYaw = true; }
+  if (vr){ vr.v.currentTime = 0; playWithSound(vr.v); vr.needYaw = true; }
+});
+// VRから出たら、VR180の音は止める
+renderer.xr.addEventListener('sessionend', () => {
+  if (vr){ vr.v.muted = true; }
 });
 
 const isVR180 = f => /vr180/i.test(f.name);
