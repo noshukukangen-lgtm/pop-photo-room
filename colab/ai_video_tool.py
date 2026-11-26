@@ -4,8 +4,8 @@
 # ・写真はその場でアップロード（Googleドライブにはさわらない）
 # ・動きは「ほほえみとまばたき」などから選ぶか、自由に書く（日本語でもOK。英語の方が指示通りになりやすい）
 # ・「ループにする」なら、最初と最後のコマを元の写真にして、つなぎ目が分からないようにする
-# ・できるもの：〜_ai.mp4（AIが作った動画そのまま）と 〜_ai_loop.webm（背景透明。アプリの「ループ動画」で読み込む）
-import os, gc, base64, subprocess
+# ・できるもの：〜_ai.mp4（AIが作った動画そのまま）と 〜_ai_loop.webm（背景透明。アプリの「動画」で読み込む）
+import os, gc, base64, subprocess, time
 import numpy as np
 import ipywidgets as W
 from IPython.display import display, HTML
@@ -15,7 +15,7 @@ IN_DIR, OUT_DIR = '/content/ai_in', '/content/ai_out'
 IMG_EXT = ('.jpg', '.jpeg', '.png', '.heic', '.heif', '.webp')
 
 MODELS = {
-    'small': dict(name='小さめ（TI2V-5B・1本10分くらい）', repo='Wan-AI/Wan2.2-TI2V-5B-Diffusers',
+    'small': dict(name='小さめ（TI2V-5B・L4で1本15〜25分くらい）', repo='Wan-AI/Wan2.2-TI2V-5B-Diffusers',
                   area=704 * 1280, frames=121, fps=24, steps=40, cfg=5.0),
     'large': dict(name='大きめ（I2V-A14B・1本30分以上。GPUはA100がおすすめ）', repo='Wan-AI/Wan2.2-I2V-A14B-Diffusers',
                   area=480 * 832, frames=81, fps=16, steps=40, cfg=3.5),
@@ -56,6 +56,10 @@ def _load(key, log):
     vae = AutoencoderKLWan.from_pretrained(m['repo'], subfolder='vae', torch_dtype=torch.float32)
     p = WanImageToVideoPipeline.from_pretrained(m['repo'], vae=vae, torch_dtype=torch.bfloat16)
     p.enable_model_cpu_offload()        # GPUのメモリが足りるように、使う部分だけGPUに載せる
+    try:
+        p.vae.enable_tiling()           # 最後に動画へ戻すところも、少しずつ処理してメモリを節約
+    except Exception:
+        pass
     _pipe, _key = p, key
     return p
 
@@ -81,13 +85,22 @@ def _write_mp4(frames, path, fps):
 
 def generate(path, key, prompt, loop, log, box):
     m = MODELS[key]
+    t0 = time.time()
     img = ImageOps.exif_transpose(Image.open(path)).convert('RGB')
     pipe = _load(key, log)
     w, h = _size(img, pipe, m['area'])
     img = img.resize((w, h), Image.LANCZOS)
+
+    # 10ステップごとに進み具合を出す
+    def on_step(p, i, t, kwargs):
+        if (i + 1) % 10 == 0 or i == 0:
+            log(f'  {i + 1} / {m["steps"]} ステップ（{(time.time() - t0) / 60:.0f}分経過）')
+        return kwargs
+
     kw = dict(image=img, prompt=prompt, negative_prompt=NEG, height=h, width=w, num_frames=m['frames'],
-              num_inference_steps=m['steps'], guidance_scale=m['cfg'], output_type='np')
-    log(f'動画を作っています…（{w}×{h}・{m["frames"] / m["fps"]:.0f}秒。しばらくかかります）')
+              num_inference_steps=m['steps'], guidance_scale=m['cfg'], output_type='np',
+              callback_on_step_end=on_step)
+    log(f'動画を作っています…（{w}×{h}・{m["frames"] / m["fps"]:.0f}秒。{m["steps"]}ステップ）')
     if loop:
         try:
             frames = pipe(last_image=img, **kw).frames[0]
@@ -101,7 +114,7 @@ def generate(path, key, prompt, loop, log, box):
     stem = os.path.splitext(os.path.basename(path))[0]
     mp4 = os.path.join(OUT_DIR, f'{stem}_ai.mp4')
     _write_mp4(frames, mp4, m['fps'])
-    log(f'AIの動画ができました：{mp4}')
+    log(f'AIの動画ができました：{mp4}（{(time.time() - t0) / 60:.0f}分）')
 
     import loop_tool as lt
     log('人物を切り抜いています…')
@@ -111,7 +124,7 @@ def generate(path, key, prompt, loop, log, box):
     lt.FPS = m['fps']
     out = os.path.join(OUT_DIR, f'{stem}_ai_loop.webm')
     lt.encode(frames, a, out)
-    log(f'完了しました：{out}')
+    log(f'完了しました：{out}（合計 {(time.time() - t0) / 60:.0f}分）')
 
     try:
         from google.colab import files
@@ -139,6 +152,12 @@ def start():
         output.enable_custom_widget_manager()
     except Exception:
         pass
+    # 人物の切り抜きAIを、先に「信用する」と登録しておく（ボタンから動かすと確認に答えられず止まるため）
+    try:
+        import torch
+        torch.hub.load('PeterL1n/RobustVideoMatting', 'resnet50', trust_repo=True)
+    except Exception as e:
+        print(f'切り抜きAIの準備で問題がありました（あとでもう一度試します）：{e}')
     print('写真を選んでください（何枚でもOK。前にアップロードした分も残っています）')
     for name, data in files.upload().items():
         with open(os.path.join(IN_DIR, os.path.basename(name)), 'wb') as f:
