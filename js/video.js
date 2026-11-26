@@ -4,6 +4,8 @@
 //   ・動画はこのブラウザの中に保存し、次に開いたときも動く（ネットには上がりません）
 //   ・名前に「vr180」が入った動画（左に左目・右に右目）は、自分を囲む半球に左右の目それぞれ映す
 //     （撮ったときのカメラ位置から見る形。つかんで動かすことはできない。音も出す）
+//   ・「〜_vr180_packed.mp4」は型紙つきの普通の動画：上 2/3 が映像、下 1/3 が型紙（白＝人、黒＝背景）。
+//     透明な動画より軽いので、元の画質のまま流せる
 import * as THREE from 'three';
 
 const A = window.APP;
@@ -39,7 +41,8 @@ function makeVideo(blob){
       v.width = v.videoWidth; v.height = v.videoHeight;
       resolve(v);
     }, { once: true });
-    v.addEventListener('error', () => reject(new Error('動画を読み込めませんでした（形式が未対応の可能性）')), { once: true });
+    v.addEventListener('error', () => reject(new Error(
+      '動画を読み込めませんでした（形式が未対応の可能性。VR180なら、Colabで画質を「軽め（H.264）」にして作り直してみてください）')), { once: true });
   });
 }
 
@@ -144,10 +147,41 @@ function playWithSound(v){
   v.play().catch(() => { v.muted = true; v.play().catch(() => {}); });
 }
 
+// 半球の見た目。型紙つき（packed）なら、上 2/3 の映像を下 1/3 の型紙で切り抜く
+const VR_VERT = `
+varying vec2 vUv;
+void main(){
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+const VR_FRAG = `
+uniform sampler2D map;
+uniform float uPacked;
+varying vec2 vUv;
+float toSRGB(float x){ return x < 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1.0 / 2.4) - 0.055; }
+void main(){
+  vec4 c;
+  float a;
+  if (uPacked > 0.5){
+    c = texture2D(map, vec2(vUv.x, 1.0 / 3.0 + vUv.y * (2.0 / 3.0)));
+    // 型紙は色として読まれるので、元の明るさに戻してから使う
+    a = toSRGB(texture2D(map, vec2(vUv.x, vUv.y / 3.0)).r);
+    a = smoothstep(0.08, 0.92, a);
+  } else {
+    c = texture2D(map, vUv);
+    a = c.a;
+  }
+  if (a < 0.02) discard;
+  gl_FragColor = vec4(c.rgb, a);
+  #include <colorspace_fragment>
+}`;
+
 async function loadVR180(file){
   status.textContent = 'VR180の動画を開いています…';
   const v = await makeVideo(file);
   clearVR180();
+  // 型紙つきかどうか：名前に「packed」があるか、縦横比が 3:4 に近い（ふつうのVR180は 1:2）
+  const packed = /packed/i.test(file.name) || v.videoHeight > v.videoWidth * 0.62;
   const tex = new THREE.VideoTexture(v);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.minFilter = THREE.LinearFilter;
@@ -161,7 +195,13 @@ async function loadVR180(file){
     geo.scale(-1, 1, 1);                       // 内側から見る
     const uv = geo.attributes.uv;
     for (let i = 0; i < uv.count; i++) uv.setX(i, uv.getX(i) * 0.5 + eye * 0.5);   // 左目は左半分、右目は右半分
-    const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, alphaTest: 0.02 });
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { map: { value: tex }, uPacked: { value: packed ? 1 : 0 } },
+      vertexShader: VR_VERT,
+      fragmentShader: VR_FRAG,
+      transparent: true,
+      depthWrite: false,
+    });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.layers.set(eye + 1);                  // three.js では 1＝左目だけ、2＝右目だけに見える
     mesh.renderOrder = -1;
@@ -173,8 +213,31 @@ async function loadVR180(file){
   // VRに入る前は音なしで。VRに入ったら最初から音つきで流す
   v.play().catch(() => {});
   if (renderer.xr.isPresenting){ v.currentTime = 0; playWithSound(v); }
+  const eyeW = v.videoWidth / 2;
+  const eyeH = packed ? v.videoHeight * 2 / 3 : v.videoHeight;
   status.textContent = 'VR180の動画を読み込みました。START AR を押すと、撮ったときの位置に人が見えます（音も出ます）。';
-  A.note('VR180の動画を読み込みました（左右の目で別々に表示）');
+  A.note(`VR180の動画を読み込みました（片目 ${Math.round(eyeW)}×${Math.round(eyeH)}${packed ? '・型紙つき' : ''}）`);
+  watchSmoothness(v);
+}
+
+// 再生がカクついていないか見て、ひどければ知らせる（コマ落ちの割合）
+function watchSmoothness(v){
+  if (!v.getVideoPlaybackQuality) return;
+  let last = null;
+  const iv = setInterval(() => {
+    if (!vr || vr.v !== v){ clearInterval(iv); return; }
+    if (v.paused) return;
+    const q = v.getVideoPlaybackQuality();
+    if (last){
+      const total = q.totalVideoFrames - last.totalVideoFrames;
+      const dropped = q.droppedVideoFrames - last.droppedVideoFrames;
+      if (total > 30 && dropped / total > 0.2){
+        A.note(`VR180：コマ落ちが多めです（${Math.round(dropped / total * 100)}%）。カクつくなら、Colabで画質を「軽め」にして作り直してください`);
+        clearInterval(iv);
+      }
+    }
+    last = q;
+  }, 10000);
 }
 
 // 半球はいつも自分の頭の位置に。向きはVRに入ったときの正面に合わせる
