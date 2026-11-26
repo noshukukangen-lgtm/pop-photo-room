@@ -2,6 +2,8 @@
 //   ・奥行きは最初のコマからブラウザのAIで作る（動きが小さいので1枚分で十分）
 //   ・切り抜きは動画そのものの透明度を使う
 //   ・動画はこのブラウザの中に保存し、次に開いたときも動く（ネットには上がりません）
+//   ・「〜_vr180_loop.webm」（左に左目・右に右目）は、自分を囲む半球に左右の目それぞれ映す
+//     （撮ったときのカメラ位置から見る形。つかんで動かすことはできない）
 import * as THREE from 'three';
 
 const A = window.APP;
@@ -119,21 +121,90 @@ A.buildPhotoMesh = d => {
   }
 };
 
+// =====================================================================
+// VR180（左に左目・右に右目）— 自分を囲む半球に、左右の目それぞれの映像を映す
+// =====================================================================
+let vr = null;
+const vrPos = new THREE.Vector3(), vrFwd = new THREE.Vector3();
+
+function clearVR180(){
+  if (!vr) return;
+  A.scene.remove(vr.group);
+  vr.group.children.forEach(m => { m.geometry.dispose(); m.material.dispose(); });
+  vr.tex.dispose();
+  vr.v.pause();
+  URL.revokeObjectURL(vr.v.src);
+  vr = null;
+}
+A.clearVR180 = clearVR180;
+
+async function loadVR180(file){
+  status.textContent = 'VR180の動画を開いています…';
+  const v = await makeVideo(file);
+  clearVR180();
+  const tex = new THREE.VideoTexture(v);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+
+  const group = new THREE.Group();
+  [0, 1].forEach(eye => {
+    // 正面（-Z）が映像の真ん中、左端〜右端が左90°〜右90°になる半球
+    const geo = new THREE.SphereGeometry(20, 96, 48, -Math.PI, Math.PI);
+    geo.scale(-1, 1, 1);                       // 内側から見る
+    const uv = geo.attributes.uv;
+    for (let i = 0; i < uv.count; i++) uv.setX(i, uv.getX(i) * 0.5 + eye * 0.5);   // 左目は左半分、右目は右半分
+    const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, alphaTest: 0.02 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.layers.set(eye + 1);                  // three.js では 1＝左目だけ、2＝右目だけに見える
+    mesh.renderOrder = -1;
+    mesh.raycast = () => {};
+    group.add(mesh);
+  });
+  A.scene.add(group);
+  vr = { group, v, tex, needYaw: true };
+  v.play().catch(() => {});
+  status.textContent = 'VR180の動画を読み込みました。START AR を押すと、撮ったときの位置に人が見えます。';
+  A.note('VR180の動画を読み込みました（左右の目で別々に表示）');
+}
+
+// 半球はいつも自分の頭の位置に。向きはVRに入ったときの正面に合わせる
+const origRender = renderer.render.bind(renderer);
+renderer.render = (scene, cam) => {
+  if (vr){
+    A.camera.getWorldPosition(vrPos);
+    vr.group.position.copy(vrPos);
+    if (vr.needYaw && renderer.xr.isPresenting){
+      A.camera.getWorldDirection(vrFwd);
+      vr.group.rotation.y = Math.atan2(-vrFwd.x, -vrFwd.z);
+      vr.needYaw = false;
+    }
+  }
+  origRender(scene, cam);
+};
+
 // VRに入ったとき、止まっている動画があれば再生し直す
 renderer.xr.addEventListener('sessionstart', () => {
   for (const m of photos) if (m.userData.video) m.userData.video.play().catch(() => {});
+  if (vr){ vr.v.play().catch(() => {}); vr.needYaw = true; }
 });
+
+const isVR180 = f => /vr180/i.test(f.name);
 
 $('videos').addEventListener('change', async e => {
   const files = [...(e.target.files || [])];
   for (let i = 0; i < files.length; i++){
     try {
-      await loadLoopVideo(files[i], `動画 ${i+1} 本目`);
-      A.note(`動画 ${i+1} 本目：完了`);
+      if (isVR180(files[i])) await loadVR180(files[i]);
+      else {
+        await loadLoopVideo(files[i], `動画 ${i+1} 本目`);
+        A.note(`動画 ${i+1} 本目：完了`);
+      }
     } catch (err) {
       showErr(`動画 ${i+1} 本目（${files[i].name}）で失敗：${err && err.message ? err.message : err}`);
     }
   }
-  if (files.length) status.textContent = `合計 ${photos.length} 枚 準備完了。START AR を押してください。`;
+  if (files.length && !files.every(isVR180)) status.textContent = `合計 ${photos.length} 枚 準備完了。START AR を押してください。`;
   e.target.value = '';
 });
