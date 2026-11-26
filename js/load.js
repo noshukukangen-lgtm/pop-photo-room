@@ -1,4 +1,4 @@
-// load.js — ファイルの読み込みと、人の大きさで前に並べる初期配置
+// load.js — ファイルの読み込みと、人の大きさで自分の周りに並べる初期配置
 import * as THREE from 'three';
 
 const A = window.APP;
@@ -99,14 +99,15 @@ async function readPopFile(file, label){
 }
 
 // =====================================================================
-// 初期レイアウト：人の大きさにして、自分の前（左右180°）にぎっしり並べる
+// 初期レイアウト：人の大きさにして、自分の周り（360°）をぐるっと取り囲む
+//   1枚目は正面。そこから右回りに、写真の幅に応じて均等に並べる
 //   入りきらないときは、写真どうしを重ねて詰める
 //   全身の写真は、床を認識していれば足を床にぴったり立たせる
 // =====================================================================
 const EYE_FALLBACK = 1.5;   // まだVRに入っていないときの目の高さ（m）
-const GAP = 0.05;           // 余裕があるときの写真どうしのすき間（m）
+const GAP = 0.05;           // 写真どうしのすき間の目安（m）
 const RADIUS = 1.0;         // 自分からの距離（m）
-const SPAN = Math.PI;       // 並べる範囲（正面の左右90°ずつ＝180°）
+const SPAN = Math.PI * 2;   // 並べる範囲（自分の周りぐるっと＝360°）
 
 // 切り抜きの範囲から「人の大きさ」を決める（top・bottom は写真の中での高さ）
 A.personLayout = (M, gw, gh, w, h) => {
@@ -146,15 +147,17 @@ A.arrangeAround = () => {
   if (tmpF.lengthSq() < 1e-4) tmpF.set(0, 0, -1);
   tmpF.normalize();
 
-  // 1人ぶんの角度。合計が180°を超えるなら、全員を同じ割合で詰めて（重ねて）収める
+  // 1人ぶんの角度を、合計がちょうど360°になるように伸ばし縮みさせる
+  //   少ないときは間をあけてぐるりと囲み、多いときは重なりながら一周に収める
   const angles = photos.map(m => (m.userData.layout.width + GAP) / RADIUS);
   const total = angles.reduce((a, b) => a + b, 0);
-  const k = Math.min(1, SPAN / total);
-  let phi = total * k / 2;   // 左から右へ
+  const k = SPAN / total;
+  let acc = 0;
   photos.forEach((m, i) => {
     const L = m.userData.layout;
-    const a = phi - angles[i] * k / 2;
-    phi -= angles[i] * k;
+    // 1枚目の真ん中が正面（a = 0）。そこから右回りに進む
+    const a = -(acc + angles[i] * k / 2 - angles[0] * k / 2);
+    acc += angles[i] * k;
     const dx = tmpF.x * Math.cos(a) + tmpF.z * Math.sin(a);
     const dz = -tmpF.x * Math.sin(a) + tmpF.z * Math.cos(a);
     m.scale.setScalar(L.s);
@@ -168,10 +171,10 @@ A.arrangeAround = () => {
     const r = RADIUS + (i % 2) * 0.03;
     m.position.set(tmpC.x + dx * r, y, tmpC.z + dz * r);
     m.lookAt(tmpC.x, y, tmpC.z);
-    m.translateX(-L.s * L.cx);   // 人が写真の真ん中にいなくても、自分の正面に来るように
+    m.translateX(-L.s * L.cx);   // 人が写真の真ん中にいなくても、自分の方を向くように
   });
   A.autoArranged = true;
-  status.textContent = `${photos.length} 枚を自分の前に並べました。`;
+  status.textContent = `${photos.length} 枚で自分の周りを取り囲みました。`;
 };
 
 // VRに入ったら、自分の位置と向きに合わせて並べ直す
