@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache">
 <title>飛び出す写真ルーム（高画質・切り抜き対応）</title>
 <style>
   body{margin:0;font-family:sans-serif;background:#111;color:#eee}
@@ -22,6 +23,7 @@
   .help{font-size:12px;color:#aaa;line-height:1.6;margin-top:6px}
   select,button{font-size:14px}
   .pick{display:inline-block;margin-right:16px;font-size:14px}
+  #ver{font-size:11px;color:#777;margin-left:8px}
 </style>
 <script>
   // ===== エラーを画面下に赤く表示 =====
@@ -57,6 +59,7 @@
 <div id="ui">
   <label class="pick">写真 <input type="file" id="files" accept="image/*" multiple></label>
   <label class="pick">ループ動画（〜_loop.webm） <input type="file" id="videos" accept="video/webm,video/*" multiple></label>
+  <span id="ver"></span>
   <div style="margin-top:8px">
     <label>切り抜きAI
       <select id="cutModel">
@@ -107,17 +110,12 @@
 
 <script type="module">
 // 部品を順番に読み込む（どれかで失敗すると、画面下に赤い帯で理由が出ます）
-import './js/core.js';
-import './js/ai.js';
-import './js/photo.js';
-import './js/load.js';
-import './js/planes.js';
-import './js/xr.js';
-import './js/storage.js';
-import './js/face.js';
-import './js/follow.js';
-import './js/video.js';
-import './js/idle.js';
+// 「?v=」の番号を変えると、古い版がキャッシュに残っていても必ず新しい版を読み込みます
+const V = '20261126-2320';
+document.getElementById('ver').textContent = '版 ' + V;
+for (const f of ['core', 'ai', 'photo', 'load', 'planes', 'xr', 'storage', 'face', 'follow', 'video', 'idle']){
+  await import(`./js/${f}.js?v=${V}`);
+}
 window.appStarted = true;
 </script>
 </body>
