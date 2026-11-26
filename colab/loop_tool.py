@@ -140,7 +140,7 @@ def _model():
     global _rvm
     if _rvm is None:
         import torch
-        _rvm = torch.hub.load('PeterL1n/RobustVideoMatting', 'resnet50').eval().cuda()
+        _rvm = torch.hub.load('PeterL1n/RobustVideoMatting', 'resnet50', trust_repo=True).eval().cuda()
     return _rvm
 
 
@@ -252,6 +252,7 @@ def make_full(path, t, log, box, vr=False):
     tag = '_vr180' if vr else ''
     out = os.path.join(OUT_DIR, f'{stem}_{fmt(s).replace(":", "-")}{tag}_full.webm')
     total = int(L * FPS)
+    _model()
     log(f'{fmt(s)} から {L:.0f} 秒を、長いまま切り抜きます（{total} コマ{" × 左右2" if vr else ""}。10分以上かかることがあります）')
 
     dec = subprocess.Popen(['ffmpeg', '-v', 'error', '-ss', f'{s:.3f}', '-t', f'{L:.3f}', '-i', path,
@@ -348,6 +349,9 @@ def make_vr_packed(path, t, log, box, light=False, matte_fn=None):
     stem = os.path.splitext(os.path.basename(path))[0].split('@')[0]
     out = os.path.join(OUT_DIR, f'{stem}_{fmt(s).replace(":", "-")}_vr180_packed.mp4')
     total = int(L * fps)
+    if matte_fn is None:
+        log('切り抜きAIを準備しています…')
+        _model()
     log(f'{fmt(s)} から {L:.0f} 秒を、{w}×{h}・{fps:.0f}コマで切り抜きます（{total} コマ × 左右2。20分以上かかることがあります）')
 
     dec = subprocess.Popen(['ffmpeg', '-v', 'error', '-ss', f'{s:.3f}', '-t', f'{L:.3f}', '-i', path,
