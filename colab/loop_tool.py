@@ -5,14 +5,14 @@
 #   import sys, importlib; sys.path.insert(0, '/content'); import loop_tool; importlib.reload(loop_tool); loop_tool.start()
 #
 #   ドライブにつながずに使うときは、最後を loop_tool.start(upload=True) にする
-#   （その場で動画をアップロードして、できたループ動画はダウンロードされる。Googleドライブには一切さわらない）
+#   （その場で動画をアップロードして、できた動画はダウンロードされる。Googleドライブには一切さわらない）
 #
 # ・動画は マイドライブ/kirinuki/input_videos に入れる（upload=True のときは不要）
 # ・ファイル名の最後に「@1分23秒」「@1時間2分3秒」「@1-23」のように書いておくと、その時間ですぐ作れる
 # ・書いていなければ、サムネイル（1分ごと → 前後1分を2秒ごと）で場面を選ぶ
-# ・選んだ時間の前後から、最初と最後がいちばん似ている2〜5秒を自動で探して切り出す
-# ・VR180（左に左目・右に右目が並んだ動画）は、左右それぞれ人物を切り抜いて「〜_vr180_loop.webm」にする
-# ・できたものは マイドライブ/kirinuki/output_loops に「〜_loop.webm」（背景透明）で保存
+# ・ループ：選んだ時間の前後から、最初と最後がいちばん似ている2〜5秒を自動で探して切り出す
+# ・長いまま：選んだ時間の前後1分ずつ（切り出しツールで作ったクリップなら全部）を、音声つきでそのまま切り抜く
+# ・VR180（左に左目・右に右目が並んだ動画）は、左右それぞれ人物を切り抜いて名前に「_vr180」を付ける
 import os, re, json, subprocess, shutil, tempfile, base64, io
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
@@ -29,6 +29,7 @@ FPS = 24                # 出力のコマ数
 MIN_LEN, MAX_LEN = 2.0, 5.0   # ループの長さ（秒）
 SEARCH = 4.0            # 選んだ時間の前後、何秒の中から探すか
 FADE = 8                # 終わりを最初に溶け込ませるコマ数
+FULL_HALF = 60.0        # 長いまま：選んだ時間の前後、何秒ずつ使うか
 VIDEO_EXT = ('.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi')
 UPLOAD = False
 
@@ -185,17 +186,31 @@ def encode(rgb, a, out):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _out_size(path, s, vr):
+    w0, h0 = frame_size(path, s, 64)
+    if vr:
+        return VR_LONG
+    return LONG_SIDE if w0 >= h0 else int(round(LONG_SIDE * w0 / h0 / 2) * 2)
+
+
+def _download(out, log, box):
+    if not UPLOAD:
+        return
+    try:
+        from google.colab import files
+        with box:
+            files.download(out)
+        log('ダウンロードを始めました（始まらなければ、左のフォルダの loop_out から右クリックでダウンロード）')
+    except Exception as e:
+        log(f'自動ダウンロードできませんでした：左のフォルダの loop_out から右クリックでダウンロードしてください（{e}）')
+
+
 def make(path, t, log, box, vr=False):
     dur = duration(path)
     log(f'{fmt(t)} の前後で、きれいにループする区間を探しています…')
     s, L, d = find_loop(path, t, dur)
     log(f'{fmt(s)} から {L:.1f} 秒を使います（つなぎ目の差 {d:.1f}、小さいほどなめらか）')
-    w0, h0 = frame_size(path, s, 64)
-    if vr:
-        width = VR_LONG
-    else:
-        width = LONG_SIDE if w0 >= h0 else int(round(LONG_SIDE * w0 / h0 / 2) * 2)
-    frames = read_frames(path, s, L, width, FPS)
+    frames = read_frames(path, s, L, _out_size(path, s, vr), FPS)
     if vr:
         half = frames.shape[2] // 2
         frames = np.ascontiguousarray(frames[:, :, :half * 2])
@@ -212,14 +227,7 @@ def make(path, t, log, box, vr=False):
     encode(rgb, a, out)
     Image.fromarray(np.dstack([rgb[0], a[0]]), 'RGBA').save(out.replace('_loop.webm', '_loop_first.png'))
     log(f'完了しました：{out}')
-    if UPLOAD:
-        try:
-            from google.colab import files
-            with box:
-                files.download(out)
-            log('ダウンロードを始めました（始まらなければ、左のフォルダの loop_out から右クリックでダウンロード）')
-        except Exception as e:
-            log(f'自動ダウンロードできませんでした：左のフォルダの loop_out から右クリックでダウンロードしてください（{e}）')
+    _download(out, log, box)
     b64 = base64.b64encode(open(out, 'rb').read()).decode()
     with box:
         display(HTML(
@@ -227,6 +235,67 @@ def make(path, t, log, box, vr=False):
             'background:repeating-conic-gradient(#bbb 0 25%,#eee 0 50%) 0 0/20px 20px">'
             f'<video src="data:video/webm;base64,{b64}" autoplay loop muted playsinline '
             'style="max-width:480px;max-height:480px;display:block"></video></div>'))
+
+
+def make_full(path, t, log, box, vr=False):
+    """ループにせず、長いまま切り抜く（1コマずつ処理して、そのまま動画に流し込むのでメモリを食わない）"""
+    import torch
+    dur = duration(path)
+    s = max(0.0, t - FULL_HALF)
+    L = min(dur, t + FULL_HALF) - s
+    w, h = frame_size(path, s, _out_size(path, s, vr))
+    if vr:
+        w = (w // 4) * 4
+    half = w // 2
+    stem = os.path.splitext(os.path.basename(path))[0].split('@')[0]
+    tag = '_vr180' if vr else ''
+    out = os.path.join(OUT_DIR, f'{stem}_{fmt(s).replace(":", "-")}{tag}_full.webm')
+    total = int(L * FPS)
+    log(f'{fmt(s)} から {L:.0f} 秒を、長いまま切り抜きます（{total} コマ{" × 左右2" if vr else ""}。10分以上かかることがあります）')
+
+    dec = subprocess.Popen(['ffmpeg', '-v', 'error', '-ss', f'{s:.3f}', '-t', f'{L:.3f}', '-i', path,
+                            '-vf', f'scale={w}:{h},fps={FPS}', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
+                           stdout=subprocess.PIPE)
+    enc = subprocess.Popen(['ffmpeg', '-v', 'error', '-y',
+                            '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', f'{w}x{h}', '-framerate', str(FPS), '-i', 'pipe:0',
+                            '-ss', f'{s:.3f}', '-t', f'{L:.3f}', '-i', path,
+                            '-map', '0:v', '-map', '1:a?',
+                            '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '30',
+                            '-deadline', 'good', '-cpu-used', '5', '-row-mt', '1', '-auto-alt-ref', '0',
+                            '-c:a', 'libopus', '-b:a', '128k', '-shortest', out],
+                           stdin=subprocess.PIPE)
+    m = _model()
+    ds = min(1.0, 512 / max(h, half if vr else w))
+    recs = [[None] * 4, [None] * 4]
+    fb = w * h * 3
+    n = 0
+    try:
+        with torch.no_grad():
+            while True:
+                buf = dec.stdout.read(fb)
+                if len(buf) < fb:
+                    break
+                fr = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+                parts = [fr[:, :half], fr[:, half:]] if vr else [fr]
+                alphas = []
+                for k, p in enumerate(parts):
+                    x = torch.from_numpy(np.ascontiguousarray(p)).cuda().permute(2, 0, 1)[None].float() / 255
+                    res = m(x, *recs[k], ds)
+                    recs[k] = list(res[2:])
+                    alphas.append((res[1][0, 0].clamp(0, 1) * 255).byte().cpu().numpy())
+                rgba = np.dstack([fr, np.concatenate(alphas, axis=1)])
+                if n == 0:
+                    Image.fromarray(rgba, 'RGBA').save(out.replace('_full.webm', '_full_first.png'))
+                enc.stdin.write(rgba.tobytes())
+                n += 1
+                if n % (FPS * 10) == 0:
+                    log(f'  {n // FPS} / {L:.0f} 秒 まで切り抜きました')
+    finally:
+        enc.stdin.close()
+        enc.wait()
+        dec.wait()
+    log(f'完了しました：{out}（{os.path.getsize(out) / 1048576:.0f} MB）')
+    _download(out, log, box)
 
 
 def start(upload=False):
@@ -249,6 +318,7 @@ def start(upload=False):
     go = W.Button(description='サムネイルを出す', button_style='primary')
     name_btn = W.Button(button_style='success', layout=W.Layout(width='300px'))
     vrc = W.Checkbox(description='VR180（左に左目・右に右目が並んだ動画）', indent=False)
+    full = W.Checkbox(description='長いまま（ループにしない。選んだ時間の前後1分ずつ・音声つき）', indent=False)
     area = W.VBox()
     box = W.Output()
 
@@ -267,6 +337,7 @@ def start(upload=False):
         try:
             w, h = frame_size(path(), 1, 64)
             vrc.value = w >= 1.9 * h        # 横が縦の約2倍ならVR180とみなす（違えば外せる）
+            full.value = vrc.value          # VR180は最初から「長いまま」
         except Exception:
             pass
     dd.observe(on_dd, 'value')
@@ -313,10 +384,13 @@ def start(upload=False):
 
     def run(t):
         try:
-            make(path(), t, log, box, vrc.value)
+            if full.value:
+                make_full(path(), t, log, box, vrc.value)
+            else:
+                make(path(), t, log, box, vrc.value)
         except Exception as e:
             log(f'失敗しました：{e}')
 
     go.on_click(level1)
     name_btn.on_click(lambda _: run(time_from_name(dd.value)))
-    display(W.VBox([W.HBox([dd, go, name_btn]), vrc, area, box]))
+    display(W.VBox([W.HBox([dd, go, name_btn]), vrc, full, area, box]))
