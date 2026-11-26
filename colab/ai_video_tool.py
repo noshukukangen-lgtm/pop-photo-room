@@ -1,10 +1,12 @@
-# ai_video_tool.py — 写真1枚から、AI（Wan 2.2）で数秒の動画を作って、背景を消したループ動画にする（Colab用）
+# ai_video_tool.py — 写真1枚から、AI（Wan 2.2）で数秒の動画を作って、全部のコマで立体になるループ動画にする（Colab用）
 #
 # 使い方は colab/ai_video_colab.ipynb を開いて上から実行するだけ。
 # ・写真はその場でアップロード（Googleドライブにはさわらない）
 # ・動きは「ほほえみとまばたき」などから選ぶか、自由に書く（日本語でもOK。英語の方が指示通りになりやすい）
 # ・「ループにする」なら、最初と最後のコマを元の写真にして、つなぎ目が分からないようにする
-# ・できるもの：〜_ai.mp4（AIが作った動画そのまま）と 〜_ai_loop.webm（背景透明。アプリの「動画」で読み込む）
+# ・できるもの：〜_ai.mp4（AIが作った動画そのまま）と 〜_ai_3d.mp4（上に映像、下に切り抜き・奥行き・ふくらみ。
+#   アプリの「動画」で読み込むと、全部のコマで立体になる）
+# ・前に作った 〜_ai.mp4 を立体にし直すときは：depth3d.to_3d('/content/ai_out/〜_ai.mp4')
 import os, gc, base64, subprocess, time
 import numpy as np
 import ipywidgets as W
@@ -15,7 +17,7 @@ IN_DIR, OUT_DIR = '/content/ai_in', '/content/ai_out'
 IMG_EXT = ('.jpg', '.jpeg', '.png', '.heic', '.heif', '.webp')
 
 MODELS = {
-    'small': dict(name='小さめ（TI2V-5B・L4で1本15〜25分くらい）', repo='Wan-AI/Wan2.2-TI2V-5B-Diffusers',
+    'small': dict(name='小さめ（TI2V-5B・L4で1本20〜25分くらい）', repo='Wan-AI/Wan2.2-TI2V-5B-Diffusers',
                   area=704 * 1280, frames=121, fps=24, steps=40, cfg=5.0),
     'large': dict(name='大きめ（I2V-A14B・1本30分以上。GPUはA100がおすすめ）', repo='Wan-AI/Wan2.2-I2V-A14B-Diffusers',
                   area=480 * 832, frames=81, fps=16, steps=40, cfg=3.5),
@@ -117,13 +119,13 @@ def generate(path, key, prompt, loop, log, box):
     log(f'AIの動画ができました：{mp4}（{(time.time() - t0) / 60:.0f}分）')
 
     import loop_tool as lt
+    import depth3d
     log('人物を切り抜いています…')
     a = lt.matte(frames)
     if loop:
         frames, a = lt.loop_blend(frames, a)
-    lt.FPS = m['fps']
-    out = os.path.join(OUT_DIR, f'{stem}_ai_loop.webm')
-    lt.encode(frames, a, out)
+    out = os.path.join(OUT_DIR, f'{stem}_ai_3d.mp4')
+    depth3d.encode_3d(frames, a, out, m['fps'], log, loop)
     log(f'完了しました：{out}（合計 {(time.time() - t0) / 60:.0f}分）')
 
     try:
@@ -134,13 +136,11 @@ def generate(path, key, prompt, loop, log, box):
         log('ダウンロードを始めました（始まらなければ、左のフォルダの ai_out から右クリックでダウンロード）')
     except Exception as e:
         log(f'自動ダウンロードできませんでした：左のフォルダの ai_out から右クリックでダウンロードしてください（{e}）')
-    b64 = base64.b64encode(open(out, 'rb').read()).decode()
+    b64 = base64.b64encode(open(mp4, 'rb').read()).decode()
     with box:
         display(HTML(
-            '<div style="display:inline-block;padding:8px;'
-            'background:repeating-conic-gradient(#bbb 0 25%,#eee 0 50%) 0 0/20px 20px">'
-            f'<video src="data:video/webm;base64,{b64}" autoplay loop muted playsinline '
-            'style="max-width:480px;max-height:480px;display:block"></video></div>'))
+            f'<video src="data:video/mp4;base64,{b64}" autoplay loop muted playsinline '
+            'style="max-width:480px;max-height:480px;display:block"></video>'))
 
 
 def start():
