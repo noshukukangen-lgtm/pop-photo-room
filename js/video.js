@@ -6,7 +6,7 @@
 //     （撮ったときのカメラ位置から見る形。つかんで動かすことはできない。音も出す）
 //   ・「〜_vr180_packed.mp4」は型紙つきの普通の動画：上 2/3 が映像、下 1/3 が型紙（白＝人、黒＝背景）。
 //     透明な動画より軽いので、元の画質のまま流せる
-//   ・「〜_3d.mp4」（ループ動画・AI動画）は、上 2/3 が映像、下 1/3 が [切り抜き｜奥行き｜ふくらみ]。
+//   ・「〜_3d.mp4」（ループ動画・AI動画）は、上 2/3 が映像、下 1/3 の左 2/3 が切り抜き、右 1/3 の上が奥行き・下がふくらみ。
 //     再生中のコマの奥行きで毎コマ形を作り直すので、全部のコマで立体になる
 import * as THREE from 'three';
 
@@ -54,6 +54,7 @@ function makeVideo(blob){
   });
 }
 
+const soundMeshes = new Set();
 // 全部のコマで立体にする動画（〜_3d.mp4）用：再生中のコマの奥行き・ふくらみで形を作る
 const DV_VERT = `
 uniform sampler2D map;
@@ -64,8 +65,8 @@ float dvSRGB(float x){ return x < 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1.0 / 2
 void main(){
   vUv = uv;
   vec3 p = position;
-  float d = dvSRGB(texture2D(map, vec2(1.0 / 3.0 + uv.x / 3.0, uv.y / 3.0)).r);
-  float b = dvSRGB(texture2D(map, vec2(2.0 / 3.0 + uv.x / 3.0, uv.y / 3.0)).r) * 0.3;
+  float d = dvSRGB(texture2D(map, vec2(2.0 / 3.0 + uv.x / 3.0, 1.0 / 6.0 + uv.y / 6.0)).r);
+  float b = dvSRGB(texture2D(map, vec2(2.0 / 3.0 + uv.x / 3.0, uv.y / 6.0)).r) * 0.3;
   p.z = uDepthS * (uRef + (d - uRef) * uRelief) + uInflate * b;
   vWorld = (modelMatrix * vec4(p, 1.0)).xyz;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
@@ -85,12 +86,15 @@ function use3D(m, v){
     mat.fragmentShader = mat.fragmentShader
       .replace('varying vec3 vWorld;', 'varying vec3 vWorld;\nfloat dvSRGB(float x){ return x < 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1.0 / 2.4) - 0.055; }')
       .replace('vec4 c = texture2D(map, vUv);', 'vec4 c = texture2D(map, vec2(vUv.x, 1.0 / 3.0 + vUv.y * (2.0 / 3.0)));')
-      .replace('float a = texture2D(maskMap, vUv).r;', 'float a = dvSRGB(texture2D(map, vec2(vUv.x / 3.0, vUv.y / 3.0)).r);');
+      .replace('float a = texture2D(maskMap, vUv).r;', 'float a = dvSRGB(texture2D(map, vec2(vUv.x * (2.0 / 3.0), vUv.y / 3.0)).r);');
     mat.needsUpdate = true;
   }
   m.userData.video = v;
   m.userData.dv = true;
-  v.play().catch(() => {});
+  // 長い動画（本物の動画を長いまま作ったもの）は、VRの中では音も出す
+  m.userData.sound = v.duration > 15;
+  if (m.userData.sound) soundMeshes.add(m);
+  if (m.userData.sound && renderer.xr.isPresenting) playWithSound(v); else v.play().catch(() => {});
 }
 
 // 写真の見た目を動画に差し替える（透明度は動画のものを使う）
@@ -125,8 +129,8 @@ async function firstFrame(v){
 async function load3DVideo(file, label, v){
   await firstFrame(v);
   const W = v.videoWidth, Ht = v.videoHeight;
-  const H = Math.round(Ht * 2 / 3), th = Ht - H, tw = Math.floor(W / 3);
-  // 最初のコマ：映像（上）、型紙（左下）、奥行き（真ん中下）
+  const H = Math.round(Ht * 2 / 3), bh = Ht - H, mw = Math.round(W * 2 / 3), dw = W - mw, qh = Math.floor(bh / 2);
+  // 最初のコマ：映像（上）、型紙（左下 2/3）、奥行き（右下の上半分）
   const frame = document.createElement('canvas');
   frame.width = W; frame.height = H;
   frame.getContext('2d').drawImage(v, 0, 0, W, H, 0, 0, W, H);
@@ -134,10 +138,10 @@ async function load3DVideo(file, label, v){
   maskCanvas.width = W; maskCanvas.height = H;
   const mctx = maskCanvas.getContext('2d');
   mctx.imageSmoothingQuality = 'high';
-  mctx.drawImage(v, 0, H, tw, th, 0, 0, W, H);
+  mctx.drawImage(v, 0, H, mw, bh, 0, 0, W, H);
   const depthCanvas = document.createElement('canvas');
-  depthCanvas.width = tw; depthCanvas.height = th;
-  depthCanvas.getContext('2d').drawImage(v, tw, H, tw, th, 0, 0, tw, th);
+  depthCanvas.width = dw; depthCanvas.height = qh;
+  depthCanvas.getContext('2d').drawImage(v, mw, H, dw, qh, 0, 0, dw, qh);
   const [gw, gh] = A.fitSize(W, H, A.GRID);
   const G = A.canvasToGrid(depthCanvas, gw, gh);
   const M = A.canvasToGrid(maskCanvas, gw, gh);
@@ -326,6 +330,8 @@ function watchSmoothness(v){
 // 半球はいつも自分の頭の位置に。向きはVRに入ったときの正面に合わせる
 const origRender = renderer.render.bind(renderer);
 renderer.render = (scene, cam) => {
+  // 消した写真の動画の音が鳴り続けないように止める
+  for (const m of soundMeshes) if (!photos.includes(m)){ m.userData.video.pause(); soundMeshes.delete(m); }
   for (const m of photos){
     if (!m.userData.dv) continue;
     for (const mat of [m.material, m.userData.back.material]){
@@ -348,12 +354,16 @@ renderer.render = (scene, cam) => {
 
 // VRに入ったとき、止まっている動画があれば再生し直す。VR180は最初から音つきで
 renderer.xr.addEventListener('sessionstart', () => {
-  for (const m of photos) if (m.userData.video) m.userData.video.play().catch(() => {});
+  for (const m of photos) if (m.userData.video){
+    if (m.userData.sound){ m.userData.video.currentTime = 0; playWithSound(m.userData.video); }
+    else m.userData.video.play().catch(() => {});
+  }
   if (vr){ vr.v.currentTime = 0; playWithSound(vr.v); vr.needYaw = true; }
 });
 // VRから出たら、VR180の音は止める
 renderer.xr.addEventListener('sessionend', () => {
   if (vr){ vr.v.muted = true; }
+  for (const m of photos) if (m.userData.sound) m.userData.video.muted = true;
 });
 
 // VR180かどうかは、名前だけでなく中身の形でも見分ける（Questで選ぶと名前が変わることがあるため）
