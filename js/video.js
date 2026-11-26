@@ -109,10 +109,21 @@ function useVideo(m, v){
   v.play().catch(() => {});
 }
 
+// 最初のコマが使える状態になるまで待つ（巻き戻すと、もう「読み込み完了」の合図が来ずに止まることがあるので、合図を待たずに確かめる）
+async function firstFrame(v){
+  if (v.currentTime > 0.001){
+    await new Promise(r => {
+      const t = setTimeout(r, 3000);
+      v.addEventListener('seeked', () => { clearTimeout(t); r(); }, { once: true });
+      v.currentTime = 0;
+    });
+  }
+  for (let i = 0; i < 100 && v.readyState < 2; i++) await new Promise(r => setTimeout(r, 50));
+}
+
 // ---------- 全部のコマで立体になる動画（〜_3d.mp4）を読み込む ----------
 async function load3DVideo(file, label, v){
-  v.currentTime = 0;
-  await new Promise(r => v.readyState >= 2 ? r() : v.addEventListener('loadeddata', r, { once: true }));
+  await firstFrame(v);
   const W = v.videoWidth, Ht = v.videoHeight;
   const H = Math.round(Ht * 2 / 3), th = Ht - H, tw = Math.floor(W / 3);
   // 最初のコマ：映像（上）、型紙（左下）、奥行き（真ん中下）
@@ -138,8 +149,7 @@ async function load3DVideo(file, label, v){
 async function loadLoopVideo(file, label, opened){
   status.textContent = `${label}：動画を開いています…`;
   const v = opened || await makeVideo(file);
-  v.currentTime = 0;
-  await new Promise(r => v.readyState >= 2 ? r() : v.addEventListener('loadeddata', r, { once: true }));
+  await firstFrame(v);
   const w = v.videoWidth, h = v.videoHeight;
 
   // 最初のコマ
