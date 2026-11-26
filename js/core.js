@@ -158,8 +158,10 @@ document.body.appendChild(renderer.domElement);
 // plane-detection：Questがスキャンした部屋の床・壁・天井を教えてもらう
 document.body.appendChild(ARButton.createButton(renderer, { optionalFeatures:['local-floor', 'plane-detection'] }));
 
-A.MAX_TEX = Math.min(renderer.capabilities.maxTextureSize, 4096);
-A.MAX_MASK = 2048;   // 切り抜きマスクの最大解像度（ブラウザのAIで作るとき）
+// 写真の表示に使う最大の細かさ。等身大の人を1m先で見るとき、Quest 3の画面で見分けられるのはおよそ2000ピクセル。
+// これより大きくしても見た目はほとんど変わらず、メモリだけ食って、たくさん並べると読み込めなくなる
+A.MAX_TEX = Math.min(renderer.capabilities.maxTextureSize, 2048);
+A.MAX_MASK = 1536;   // 切り抜きの型紙の最大の細かさ
 A.GRID = 512;        // 奥行き計算用の解像度（長辺）
 A.ANISO = renderer.capabilities.getMaxAnisotropy();
 

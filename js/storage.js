@@ -114,6 +114,7 @@ A.buildPhotoMesh = d => {
     if (d.saved.rel) new THREE.Matrix4().fromArray(d.saved.rel).decompose(m.position, m.quaternion, m.scale);
     A.setCut(m, !!d.saved.cut);
     m.userData.saveKey = keyOf(m);
+    A.releaseTexImages(m);   // もう保存してあるので、元の大きな画像はすぐ手放す
     return;
   }
   m.userData.id = 'p' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
@@ -134,6 +135,7 @@ async function saveNew(m){
   };
   await dbPut(rec);
   u.rel = rec.rel; u.saveKey = keyOf(m);
+  A.releaseTexImages(m);     // 保存できたら、元の大きな画像を手放してメモリを空ける
 }
 
 // ---------- 動かした・消したら保存（2秒ごとに確認） ----------
@@ -179,10 +181,16 @@ setInterval(async () => {
     try {
       const src = await createImageBitmap(r.photo);
       const mb = await createImageBitmap(r.mask);
+      // 前の版で大きく保存した型紙も、今の大きさ（MAX_MASK）まで縮めて使う
+      const [mw, mh] = A.fitSize(mb.width, mb.height, A.MAX_MASK);
       const maskCanvas = document.createElement('canvas');
-      maskCanvas.width = mb.width; maskCanvas.height = mb.height;
-      maskCanvas.getContext('2d').drawImage(mb, 0, 0);
+      maskCanvas.width = mw; maskCanvas.height = mh;
+      const mctx = maskCanvas.getContext('2d');
+      mctx.imageSmoothingQuality = 'high';
+      mctx.drawImage(mb, 0, 0, mw, mh);
       A.buildPhotoMesh({ src, width: r.width, height: r.height, G: r.G, M: r.M, gw: r.gw, gh: r.gh, maskCanvas, saved: r });
+      if (src.close) src.close();
+      if (mb.close) mb.close();
       known.add(r.id);
     } catch (e) { showErr('復元できない写真がありました：' + (e.message || e)); }
   }

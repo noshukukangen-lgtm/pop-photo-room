@@ -147,6 +147,9 @@ A.buildPhotoMesh = d => {
   depthTex.needsUpdate = true;
 
   const tex = { photo: A.toTexture(A.drawPhoto(d.src)), mask: A.toTexture(maskCanvas, false), depth: depthTex };
+  // すぐGPUに送っておく（元の大きな画像は、保存が済んだら手放してメモリを空ける）
+  A.renderer.initTexture(tex.photo);
+  A.renderer.initTexture(tex.mask);
 
   const h = 0.6, w = h * aspect;
   const segX = aspect >= 1 ? 256 : Math.max(2, Math.round(256*aspect));
@@ -158,7 +161,8 @@ A.buildPhotoMesh = d => {
   back.raycast = () => {};       // 裏の影はつかめないようにする
   mesh.add(back);
   const B = A.computeBulge(M, gw, gh, h);
-  Object.assign(mesh.userData, { back, G, M, B, gw, gh, ref, smoothR: null, layout: A.personLayout(M, gw, gh, w, h) });
+  Object.assign(mesh.userData, { back, G, M, B, gw, gh, ref, smoothR: null, layout: A.personLayout(M, gw, gh, w, h),
+                                 texImgs: [tex.photo.image, tex.mask.image] });
 
   A.applyGeometry(mesh);
   A.setCut(mesh, $('cutDefault').checked);
@@ -168,4 +172,12 @@ A.buildPhotoMesh = d => {
   A.arrangeAround();   // VRに入ったときにもう一度、自分の位置に合わせて並べ直す
   A.applyLook();
   A.drawPanel();
+};
+
+// GPUに送り終わった元の画像（大きなcanvas）を手放す。写真1枚あたり数十〜百MB以上の節約になる
+A.releaseTexImages = m => {
+  for (const im of m.userData.texImgs || []){
+    if (im && im.getContext){ im.width = 1; im.height = 1; }
+  }
+  m.userData.texImgs = null;
 };

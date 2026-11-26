@@ -73,13 +73,13 @@ async function readPopFile(file, label){
     if (cnt[i] > 0){ G[i] /= cnt[i]; M[i] /= cnt[i]; }
   }
 
-  // 切り抜き（青）を白黒の画像にして、高精細のままマスクにする
+  // 切り抜き（青）を白黒の画像にして、型紙にする
   for (let i = 0; i < W*H; i++){
     const o = i*4, v = px[o+2];
     px[o] = v; px[o+1] = v; px[o+3] = 255;
   }
   rctx.putImageData(id, 0, 0);
-  const [mw, mh] = A.fitSize(W, H, A.MAX_TEX);
+  const [mw, mh] = A.fitSize(W, H, A.MAX_MASK);
   const maskCanvas = document.createElement('canvas');
   maskCanvas.width = mw; maskCanvas.height = mh;
   const mctx = maskCanvas.getContext('2d');
@@ -87,9 +87,14 @@ async function readPopFile(file, label){
   mctx.drawImage(rc, 0, 0, mw, mh);
   rc.width = rc.height = 1;   // メモリを早めに返す
 
+  // 写真（左半分）は、表示に使う大きさまで縮めておく
+  const [pw, ph] = A.fitSize(W, H, A.MAX_TEX);
   const lc = document.createElement('canvas');
-  lc.width = W; lc.height = H;
-  lc.getContext('2d').drawImage(img, 0, 0, W, H, 0, 0, W, H);
+  lc.width = pw; lc.height = ph;
+  const lctx = lc.getContext('2d');
+  lctx.imageSmoothingQuality = 'high';
+  lctx.drawImage(img, 0, 0, W, H, 0, 0, pw, ph);
+  img.src = '';               // 大きな元画像を手放す
   return { src: lc, width: W, height: H, G, M, gw, gh, maskCanvas };
 }
 
@@ -199,7 +204,10 @@ $('files').addEventListener('change', async e => {
     try {
       await makePopPhoto(files[i], `${i+1} 枚目`);
     } catch (err) {
-      showErr(`${i+1} 枚目（${files[i].name}）で失敗：${err && err.message ? err.message : err}`);
+      const msg = err && err.message ? err.message : String(err);
+      const hint = /読み込めません/.test(msg) && photos.length >= 8
+        ? '（形式ではなく、メモリ不足の可能性が高いです。ページを開き直すと、保存済みの写真は残ったまま続きを読み込めます）' : '';
+      showErr(`${i+1} 枚目（${files[i].name}）で失敗：${msg}${hint}`);
     }
   }
   A.setBar('allBox','allFill','allText', 1, `全体 ${n} / ${n} 枚 完了`);
