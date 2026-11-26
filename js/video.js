@@ -6,6 +6,8 @@
 //     （撮ったときのカメラ位置から見る形。つかんで動かすことはできない。音も出す）
 //   ・「〜_vr180_packed.mp4」は型紙つきの普通の動画：上 2/3 が映像、下 1/3 が型紙（白＝人、黒＝背景）。
 //     透明な動画より軽いので、元の画質のまま流せる
+//   ・「〜_3d.mp4」（ループ動画・AI動画）は、上 2/3 が映像、下 1/3 が [切り抜き｜奥行き｜ふくらみ]。
+//     再生中のコマの奥行きで毎コマ形を作り直すので、全部のコマで立体になる
 import * as THREE from 'three';
 
 const A = window.APP;
@@ -52,6 +54,45 @@ function makeVideo(blob){
   });
 }
 
+// 全部のコマで立体にする動画（〜_3d.mp4）用：再生中のコマの奥行き・ふくらみで形を作る
+const DV_VERT = `
+uniform sampler2D map;
+uniform float uDepthS, uRelief, uInflate, uRef;
+varying vec2 vUv;
+varying vec3 vWorld;
+float dvSRGB(float x){ return x < 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1.0 / 2.4) - 0.055; }
+void main(){
+  vUv = uv;
+  vec3 p = position;
+  float d = dvSRGB(texture2D(map, vec2(1.0 / 3.0 + uv.x / 3.0, uv.y / 3.0)).r);
+  float b = dvSRGB(texture2D(map, vec2(2.0 / 3.0 + uv.x / 3.0, uv.y / 3.0)).r) * 0.3;
+  p.z = uDepthS * (uRef + (d - uRef) * uRelief) + uInflate * b;
+  vWorld = (modelMatrix * vec4(p, 1.0)).xyz;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+}`;
+function use3D(m, v){
+  const vt = new THREE.VideoTexture(v);
+  vt.colorSpace = THREE.SRGBColorSpace;
+  vt.minFilter = THREE.LinearFilter;
+  vt.magFilter = THREE.LinearFilter;
+  vt.generateMipmaps = false;
+  for (const mat of [m.material, m.userData.back.material]){
+    mat.uniforms.map.value = vt;
+    mat.uniforms.uDepthS = { value: A.settings.depth };
+    mat.uniforms.uRelief = { value: A.settings.relief };
+    mat.uniforms.uInflate = { value: A.settings.inflate };
+    mat.vertexShader = DV_VERT;
+    mat.fragmentShader = mat.fragmentShader
+      .replace('varying vec3 vWorld;', 'varying vec3 vWorld;\nfloat dvSRGB(float x){ return x < 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1.0 / 2.4) - 0.055; }')
+      .replace('vec4 c = texture2D(map, vUv);', 'vec4 c = texture2D(map, vec2(vUv.x, 1.0 / 3.0 + vUv.y * (2.0 / 3.0)));')
+      .replace('float a = texture2D(maskMap, vUv).r;', 'float a = dvSRGB(texture2D(map, vec2(vUv.x / 3.0, vUv.y / 3.0)).r);');
+    mat.needsUpdate = true;
+  }
+  m.userData.video = v;
+  m.userData.dv = true;
+  v.play().catch(() => {});
+}
+
 // 写真の見た目を動画に差し替える（透明度は動画のものを使う）
 function useVideo(m, v){
   const vt = new THREE.VideoTexture(v);
@@ -66,6 +107,31 @@ function useVideo(m, v){
   }
   m.userData.video = v;
   v.play().catch(() => {});
+}
+
+// ---------- 全部のコマで立体になる動画（〜_3d.mp4）を読み込む ----------
+async function load3DVideo(file, label, v){
+  v.currentTime = 0;
+  await new Promise(r => v.readyState >= 2 ? r() : v.addEventListener('loadeddata', r, { once: true }));
+  const W = v.videoWidth, Ht = v.videoHeight;
+  const H = Math.round(Ht * 2 / 3), th = Ht - H, tw = Math.floor(W / 3);
+  // 最初のコマ：映像（上）、型紙（左下）、奥行き（真ん中下）
+  const frame = document.createElement('canvas');
+  frame.width = W; frame.height = H;
+  frame.getContext('2d').drawImage(v, 0, 0, W, H, 0, 0, W, H);
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = W; maskCanvas.height = H;
+  const mctx = maskCanvas.getContext('2d');
+  mctx.imageSmoothingQuality = 'high';
+  mctx.drawImage(v, 0, H, tw, th, 0, 0, W, H);
+  const depthCanvas = document.createElement('canvas');
+  depthCanvas.width = tw; depthCanvas.height = th;
+  depthCanvas.getContext('2d').drawImage(v, tw, H, tw, th, 0, 0, tw, th);
+  const [gw, gh] = A.fitSize(W, H, A.GRID);
+  const G = A.canvasToGrid(depthCanvas, gw, gh);
+  const M = A.canvasToGrid(maskCanvas, gw, gh);
+  A.note(`${label}：全部のコマで立体になる動画です（${W}×${H}）`);
+  A.buildPhotoMesh({ src: frame, width: W, height: H, G, M, gw, gh, maskCanvas, videoFile: file, videoEl: v, dv: true });
 }
 
 // ---------- 新しく読み込んだ動画から、立体の写真を作る ----------
@@ -116,16 +182,17 @@ A.buildPhotoMesh = d => {
   const m = photos[photos.length - 1];
   if (!m) return;
   if (d.videoEl){
-    useVideo(m, d.videoEl);
+    if (d.dv) use3D(m, d.videoEl); else useVideo(m, d.videoEl);
     const save = () => {
       if (!m.userData.id) return setTimeout(save, 200);
-      vPut({ id: m.userData.id, video: d.videoFile }).catch(e => showErr('動画を保存できませんでした：' + (e.message || e)));
+      vPut({ id: m.userData.id, video: d.videoFile, dv: !!d.dv }).catch(e => showErr('動画を保存できませんでした：' + (e.message || e)));
     };
     save();
   } else if (d.saved){
     vGet(d.saved.id).then(async rec => {
       if (!rec || !photos.includes(m)) return;
-      useVideo(m, await makeVideo(rec.video));
+      const v = await makeVideo(rec.video);
+      if (rec.dv) use3D(m, v); else useVideo(m, v);
     }).catch(() => {});
   }
 };
@@ -249,6 +316,14 @@ function watchSmoothness(v){
 // 半球はいつも自分の頭の位置に。向きはVRに入ったときの正面に合わせる
 const origRender = renderer.render.bind(renderer);
 renderer.render = (scene, cam) => {
+  for (const m of photos){
+    if (!m.userData.dv) continue;
+    for (const mat of [m.material, m.userData.back.material]){
+      mat.uniforms.uDepthS.value = A.settings.depth;
+      mat.uniforms.uRelief.value = A.settings.relief;
+      mat.uniforms.uInflate.value = A.settings.inflate;
+    }
+  }
   if (vr){
     A.camera.getWorldPosition(vrPos);
     vr.group.position.copy(vrPos);
@@ -275,12 +350,18 @@ renderer.xr.addEventListener('sessionend', () => {
 //   ・横が縦の約2倍 → ふつうのVR180（左右並び）
 //   ・WebMではなく、縦横比が 3:4 → 型紙つきのVR180（〜_vr180_packed.mp4）
 const nameVR180 = f => /vr180/i.test(f.name);
-function looksVR180(f, v){
+// WebMかどうかは中身の先頭で見分ける（名前や種類が変わっていても大丈夫）
+async function isWebm(f){
+  try {
+    const b = new Uint8Array(await f.slice(0, 4).arrayBuffer());
+    return b[0] === 0x1A && b[1] === 0x45 && b[2] === 0xDF && b[3] === 0xA3;
+  } catch (e) { return /webm/i.test(f.type) || /\.webm$/i.test(f.name); }
+}
+function looksVR180(f, v, webm){
   if (nameVR180(f)) return true;
   const w = v.videoWidth, h = v.videoHeight;
   if (w >= 1.9 * h) return true;
-  const webm = /webm/i.test(f.type) || /\.webm$/i.test(f.name);
-  return !webm && Math.abs(h / w - 0.75) < 0.04;
+  return !webm && Math.abs(h / w - 0.75) < 0.04 && w >= 2000;
 }
 
 $('videos').addEventListener('change', async e => {
@@ -294,10 +375,15 @@ $('videos').addEventListener('change', async e => {
       status.textContent = `${label}：動画を開いています…（大きい動画は30秒ほどかかります）`;
       A.note(`${label}：${f.name || '(名前なし)'}（${(f.size / 1048576).toFixed(0)} MB・${f.type || '?'}）を開いています。` +
              `HEVCの再生：${can('hvc1')}／H.264の再生：${can('avc1.640033')}`);
+      const webm = await isWebm(f);
       const v = await makeVideo(f);
       A.note(`${label}：開けました ${v.videoWidth}×${v.videoHeight}`);
-      if (looksVR180(f, v)){ vrCount++; await loadVR180(f, v); }
-      else {
+      if (looksVR180(f, v, webm)){ vrCount++; await loadVR180(f, v); }
+      else if (!webm){
+        // WebMでないループ動画は、全部のコマで立体になる動画（〜_3d.mp4）
+        await load3DVideo(f, label, v);
+        A.note(`${label}：完了`);
+      } else {
         await loadLoopVideo(f, label, v);
         A.note(`${label}：完了`);
       }
