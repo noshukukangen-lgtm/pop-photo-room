@@ -69,9 +69,9 @@ function useVideo(m, v){
 }
 
 // ---------- 新しく読み込んだ動画から、立体の写真を作る ----------
-async function loadLoopVideo(file, label){
+async function loadLoopVideo(file, label, opened){
   status.textContent = `${label}：動画を開いています…`;
-  const v = await makeVideo(file);
+  const v = opened || await makeVideo(file);
   v.currentTime = 0;
   await new Promise(r => v.readyState >= 2 ? r() : v.addEventListener('loadeddata', r, { once: true }));
   const w = v.videoWidth, h = v.videoHeight;
@@ -182,12 +182,9 @@ void main(){
   #include <colorspace_fragment>
 }`;
 
-async function loadVR180(file){
+async function loadVR180(file, opened){
   status.textContent = 'VR180の動画を開いています…（30秒ほどかかることがあります）';
-  const probe = document.createElement('video');
-  const can = c => probe.canPlayType(`video/mp4; codecs="${c}"`) || 'いいえ';
-  A.note(`VR180：${file.name}（${(file.size / 1048576).toFixed(0)} MB）を開いています。HEVCの再生：${can('hvc1')}／H.264の再生：${can('avc1.640033')}`);
-  const v = await makeVideo(file);
+  const v = opened || await makeVideo(file);
   clearVR180();
   // 型紙つきかどうか：名前に「packed」があるか、縦横比が 3:4 に近い（ふつうのVR180は 1:2）
   const packed = /packed/i.test(file.name) || v.videoHeight > v.videoWidth * 0.62;
@@ -274,21 +271,40 @@ renderer.xr.addEventListener('sessionend', () => {
   if (vr){ vr.v.muted = true; }
 });
 
-const isVR180 = f => /vr180/i.test(f.name);
+// VR180かどうかは、名前だけでなく中身の形でも見分ける（Questで選ぶと名前が変わることがあるため）
+//   ・横が縦の約2倍 → ふつうのVR180（左右並び）
+//   ・WebMではなく、縦横比が 3:4 → 型紙つきのVR180（〜_vr180_packed.mp4）
+const nameVR180 = f => /vr180/i.test(f.name);
+function looksVR180(f, v){
+  if (nameVR180(f)) return true;
+  const w = v.videoWidth, h = v.videoHeight;
+  if (w >= 1.9 * h) return true;
+  const webm = /webm/i.test(f.type) || /\.webm$/i.test(f.name);
+  return !webm && Math.abs(h / w - 0.75) < 0.04;
+}
 
 $('videos').addEventListener('change', async e => {
   const files = [...(e.target.files || [])];
+  const probe = document.createElement('video');
+  const can = c => probe.canPlayType(`video/mp4; codecs="${c}"`) || 'いいえ';
+  let vrCount = 0;
   for (let i = 0; i < files.length; i++){
+    const f = files[i], label = `動画 ${i+1} 本目`;
     try {
-      if (isVR180(files[i])) await loadVR180(files[i]);
+      status.textContent = `${label}：動画を開いています…（大きい動画は30秒ほどかかります）`;
+      A.note(`${label}：${f.name || '(名前なし)'}（${(f.size / 1048576).toFixed(0)} MB・${f.type || '?'}）を開いています。` +
+             `HEVCの再生：${can('hvc1')}／H.264の再生：${can('avc1.640033')}`);
+      const v = await makeVideo(f);
+      A.note(`${label}：開けました ${v.videoWidth}×${v.videoHeight}`);
+      if (looksVR180(f, v)){ vrCount++; await loadVR180(f, v); }
       else {
-        await loadLoopVideo(files[i], `動画 ${i+1} 本目`);
-        A.note(`動画 ${i+1} 本目：完了`);
+        await loadLoopVideo(f, label, v);
+        A.note(`${label}：完了`);
       }
     } catch (err) {
-      showErr(`動画 ${i+1} 本目（${files[i].name}）で失敗：${err && err.message ? err.message : err}`);
+      showErr(`${label}（${f.name}）で失敗：${err && err.message ? err.message : err}`);
     }
   }
-  if (files.length && !files.every(isVR180)) status.textContent = `合計 ${photos.length} 枚 準備完了。START AR を押してください。`;
+  if (files.length && vrCount < files.length) status.textContent = `合計 ${photos.length} 枚 準備完了。START AR を押してください。`;
   e.target.value = '';
 });

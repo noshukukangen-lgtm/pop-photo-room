@@ -58,7 +58,7 @@
 <body>
 <div id="ui">
   <label class="pick">写真 <input type="file" id="files" accept="image/*" multiple></label>
-  <label class="pick">ループ動画（〜_loop.webm） <input type="file" id="videos" accept="video/webm,video/*" multiple></label>
+  <label class="pick">動画（ループ・VR180） <input type="file" id="videos" accept="video/webm,video/*" multiple></label>
   <span id="ver"></span>
   <div style="margin-top:8px">
     <label>切り抜きAI
@@ -78,7 +78,7 @@
   </details>
   <div class="help">
     <b>PNGはすべてColabで作ったデータとして、AIを使わずに高精細の切り抜き・奥行きのまま読み込みます</b>（JPGなど普通の写真と混ぜて選んでもOK）<br>
-    <b>ループ動画</b>：Colabの loop_tool で作った「〜_loop.webm」を選ぶと、立体の写真と同じように置けて、ずっとくり返し再生されます<br>
+    <b>動画</b>：Colabの loop_tool で作った「〜_loop.webm」は写真と同じように置けて、ずっとくり返し再生されます。VR180（〜_vr180_packed.mp4 など）は、名前が変わっていても動画の形で見分けます<br>
     片手トリガー：つかんで移動 ／ 両手トリガー：広げて拡大縮小 ／ つかんでスティック上下：微調整<br>
     写真に手を近づけると、手から前に伸びる楕円の範囲だけ写真が透けます（調整パネルで太さ・長さを変更、太さ0で無効）<br>
     つかんで A・X：その写真の切り抜き切替 ／ B・Y：全部の切り抜き切替<br>
@@ -110,8 +110,12 @@
 
 <script type="module">
 // 部品を順番に読み込む（どれかで失敗すると、画面下に赤い帯で理由が出ます）
-// 「?v=」の番号を変えると、古い版がキャッシュに残っていても必ず新しい版を読み込みます
-const V = '20261126-2320';
+// 版の番号は version.txt から毎回（キャッシュを使わずに）取る。番号が変われば、必ず新しい部品を読み込む
+let V = '20261126-2330';
+try {
+  const t = (await (await fetch('version.txt', { cache: 'no-store' })).text()).trim();
+  if (/^[\w.-]{1,40}$/.test(t)) V = t;
+} catch (e) {}
 document.getElementById('ver').textContent = '版 ' + V;
 for (const f of ['core', 'ai', 'photo', 'load', 'planes', 'xr', 'storage', 'face', 'follow', 'video', 'idle']){
   await import(`./js/${f}.js?v=${V}`);
