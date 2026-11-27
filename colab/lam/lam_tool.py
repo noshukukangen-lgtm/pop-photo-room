@@ -4,6 +4,7 @@
 #   できるもの：一周回る確認動画、見本の表情で話して動く動画、頭部の立体（〜_lam.ply）
 #   あとで全身（LHM++）とつなぐときに使うので、頭部の形（〜_lam_mesh.obj）も一緒に保存する
 #   refine()：正面写真＋同じ人の別の写真（横顔・斜め・別の表情）で、LAMの頭部を磨く（lam_refine.py）
+#   choose(回数)：磨いた途中の回（100・200・400…）のうち、いちばん良い回を選ぶ
 import os, glob, shutil, subprocess, base64, time
 
 ROOT = '/content/LAM'
@@ -172,7 +173,7 @@ def refine(iters=800):
     if not main:
         print('写真がありません')
         return
-    print('② 同じ人の別の写真を選んでください（同じ日・同じ髪型。横顔・斜め・別の表情など。2〜8枚くらい）')
+    print('② 同じ人の別の写真を選んでください（同じ日・同じ髪型。横顔・斜め・別の表情など。Ctrlを押しながら何枚でも選べます）')
     extra = _save_jpgs(files.upload(), 'x_')
     if not extra:
         print('別の写真がないので、磨けません')
@@ -198,10 +199,29 @@ def refine(iters=800):
     print(f'\n完了しました（{(time.time() - t0) / 60:.0f}分）')
     cmp = os.path.join(OUT_DIR, f'{name}_compare.jpg')
     if os.path.exists(cmp):
-        print('左から：写真｜磨く前｜磨いた後（1行目が正面写真）')
-        display(IPImage(filename=cmp, width=720))
+        leg = os.path.join(OUT_DIR, f'{name}_compare.txt')
+        print('左から：' + (open(leg).read() if os.path.exists(leg) else '写真｜磨く前｜磨いた後') + '（1行目が正面写真）')
+        print('いちばん良い回があれば、lam_tool.choose(回数) でその回の頭部を選べます（例：lam_tool.choose(200)）')
+        display(IPImage(filename=cmp, width=960))
     _video(turn, f'{name}：磨いた後・ぐるっと一周')
     _video(ply.replace('.ply', '_talk.mp4'), f'{name}：磨いた後・見本の表情で動かしたもの')
+    try:
+        files.download(ply)
+    except Exception:
+        print(f'自動ダウンロードできませんでした：左のフォルダの lam_out から {os.path.basename(ply)} を右クリックでダウンロード')
+
+
+def choose(it, name=None):
+    """磨いた途中の回（100・200・400…）の頭部を選んで、一周の動画を作ってダウンロードする"""
+    from google.colab import files
+    hits = sorted(glob.glob(os.path.join(OUT_DIR, f'{name or "*"}_lam_refined_{it}.ply')), key=os.path.getmtime)
+    if not hits:
+        print(f'{it}回の結果が見つかりません（100・200・400・最後の回から選べます）')
+        return
+    ply = hits[-1]
+    turn = ply.replace('.ply', '_turn.mp4')
+    _run([PY, os.path.join(HERE, 'gs_preview.py'), ply, turn, '0', 'rgb'])
+    _video(turn, f'{os.path.basename(ply)}：ぐるっと一周')
     try:
         files.download(ply)
     except Exception:
