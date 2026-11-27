@@ -177,10 +177,93 @@ def pick_sym(which, ply=None):
     if not os.path.exists(p):
         print('先に lhm_tool.symmetrize() を実行してください')
         return
+    open(os.path.join(OUT_DIR, '.chosen'), 'w').write(p)     # 頭部をつなぐときに、これを使う
     try:
         files.download(p)
     except Exception:
         print(f'自動ダウンロードできませんでした：左のフォルダの lhm_out から {os.path.basename(p)} を右クリックでダウンロード')
+
+
+LAM_OUT = '/content/lam_out'
+
+
+def _upload_one(msg, ext='.ply'):
+    from google.colab import files
+    print(msg)
+    up = files.upload()
+    for fn, data in up.items():
+        tmp = os.path.join('/content', fn)
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        if fn.lower().endswith(ext):
+            os.makedirs(OUT_DIR, exist_ok=True)
+            p = os.path.join(OUT_DIR, os.path.basename(fn).replace(' ', '_'))
+            with open(p, 'wb') as f:
+                f.write(data)
+            return p
+    return None
+
+
+def join(head=None, body=None, scale=1.0, up=0, fwd=0, turn=0):
+    """全身（LHM++）の頭を、LAM の頭部に取り替えて、1人の立体人物にする
+       head：頭部の番号か .ply の場所（省略すると lam_out から選ぶ）
+       body：全身の .ply か、左右対称の "A"・"B"（省略すると pick_sym で選んだもの）
+       うまく合わないときの調整：scale＝頭の大きさの倍率（1.1 で 1割大きく）、up＝頭を上げる cm（マイナスで下げる）、
+       fwd＝頭を前に出す cm（マイナスで後ろ）、turn＝頭の向きを回す角度（後ろを向いていたら 180）"""
+    from google.colab import files
+    # 全身：左右対称で選んだもの → 最後に作ったもの → アップロード（body="A" / "B" で左右対称のどちらかを指定）
+    if isinstance(body, str) and body.upper() in ('A', 'B') and _latest():
+        body = _latest().replace('.ply', f'_sym{body.upper()}.ply')
+    if body is None:
+        c = os.path.join(OUT_DIR, '.chosen')
+        body = open(c).read().strip() if os.path.exists(c) else None
+        if not body or not os.path.exists(body):
+            body = _latest()
+    if not body:
+        body = _upload_one('全身の .ply（LHM++ で作ったもの）を選んでください')
+        if not body:
+            return
+    # 頭部：lam_out にあるもの（1つならそれ、複数なら番号で選ぶ）→ アップロード
+    heads = sorted(glob.glob(os.path.join(LAM_OUT, '*_lam*.ply')), key=os.path.getmtime)
+    heads = [h for h in heads if not h.endswith(('_offset.ply', '_before.ply'))]
+    if isinstance(head, int):
+        if not 1 <= head <= len(heads):
+            print(f'頭部の番号は 1〜{len(heads)} です')
+            return
+        head = heads[head - 1]
+    if head is None:
+        if len(heads) == 1:
+            head = heads[0]
+        elif len(heads) > 1:
+            print('頭部が複数あります。番号を選んで、もう一度実行してください（例：lhm_tool.join(head=1)）')
+            for i, h in enumerate(heads, 1):
+                print(f'  {i}：{os.path.basename(h)}')
+            return
+        else:
+            head = _upload_one('頭部の .ply（LAM で作った「〜_lam.ply」）を選んでください')
+            if not head:
+                return
+    name = os.path.splitext(os.path.basename(body))[0]
+    hname = os.path.splitext(os.path.basename(head))[0]
+    out = os.path.join(OUT_DIR, f'{name}__{hname}_joined.ply')
+    print(f'全身：{os.path.basename(body)}\n頭部：{os.path.basename(head)}\n\n■ つないでいます…')
+    code, _ = _run([PY, os.path.join(HERE, 'lhm_join.py'), body, head, out,
+                    f'scale={scale}', f'up={up}', f'fwd={fwd}', f'turn={turn}'])
+    if code != 0 or not os.path.exists(out):
+        print('失敗しました。上に出ている英語のエラーを教えてください')
+        return
+    for zoom, label in (('head', '頭のアップ'), ('body', '全身')):
+        mp4 = out.replace('.ply', f'_{zoom}.mp4')
+        print(f'\n■ 確認動画（{label}）を作っています')
+        _run([PY, os.path.join(HERE, 'lhm_preview.py'), out, mp4, 'auto', zoom])
+        _show(f'{label}：{os.path.basename(out)}', out, mp4)
+    print('\nずれていたら、数字を変えてやり直せます（例）：')
+    print(f'  lhm_tool.join(head={heads.index(head) + 1 if head in heads else repr(head)}, up=2, fwd=-1, scale=1.05)')
+    print('  up＝頭を上げる cm ／ fwd＝前に出す cm ／ scale＝大きさ ／ turn＝向き（後ろ向きなら 180）')
+    try:
+        files.download(out)
+    except Exception:
+        print(f'自動ダウンロードできませんでした：左のフォルダの lhm_out から {os.path.basename(out)} を右クリックでダウンロード')
 
 
 def flip_preview(ply):

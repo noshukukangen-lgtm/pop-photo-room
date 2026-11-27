@@ -1,5 +1,5 @@
 # lhm_preview.py — LHMが作った立体人物（.ply）を、ぐるっと一周回して見る動画にする
-#   使い方：/content/lhm_env/bin/python lhm_preview.py 入力.ply 出力.mp4 [上下反転 0/1/auto]
+#   使い方：/content/lhm_env/bin/python lhm_preview.py 入力.ply 出力.mp4 [上下反転 0/1/auto] [head＝頭のアップ]
 import sys, math
 import numpy as np
 import torch
@@ -9,6 +9,7 @@ from gsplat import rasterization
 
 src, out = sys.argv[1], sys.argv[2]
 flip = sys.argv[3] if len(sys.argv) > 3 else 'auto'
+zoom = sys.argv[4] if len(sys.argv) > 4 else 'body'
 
 v = PlyData.read(src)['vertex'].data
 names = v.dtype.names
@@ -42,6 +43,13 @@ means, quats, scales, opac, colors = T(xyz), T(q), T(sc), T(op), T(sh)
 H = float(xyz[:, 1].max() - xyz[:, 1].min())
 center = np.array([c[0], (xyz[:, 1].max() + xyz[:, 1].min()) / 2, c[2]], np.float32)
 dist = H * 1.6
+if zoom == 'head':
+    # 頭のアップ：てっぺんから身長の 12% 下を真ん中に、近くから回る
+    top = np.percentile(xyz[:, 1], 99.5) if up_sign > 0 else np.percentile(xyz[:, 1], 0.5)
+    hy = top - up_sign * 0.12 * H
+    sel = np.abs(xyz[:, 1] - hy) < 0.12 * H
+    center = np.array([np.median(xyz[sel, 0]), hy, np.median(xyz[sel, 2])], np.float32)
+    dist = H * 0.32
 W_, H_ = 540, 720
 f = H_ * 1.2
 K = torch.tensor([[f, 0, W_ / 2], [0, f, H_ / 2], [0, 0, 1]], dtype=torch.float32, device=dev)[None]
