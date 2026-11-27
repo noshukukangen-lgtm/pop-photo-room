@@ -1,8 +1,8 @@
 #!/bin/bash
-# lhm_setup.sh — 写真1枚から全身の立体人物を作るAI「LHM」を、Colabで動くように準備する
-#   LHMは Python 3.10・PyTorch 2.3 向けに作られているので、Colab本体とは別の環境（/content/lhm_env）を作って入れる
-#   一度終わると印（/content/lhm_env/.ok_*）が残り、同じセッションで再実行しても飛ばす
-#   初回は 20〜40分ほどかかる（立体表示の部品をGPU向けに組み立てるため）
+# lhm_setup.sh — 写真（1〜8枚）から全身の立体人物を作るAI「LHM++」を、Colabで動くように準備する
+#   LHM++ は Python 3.10・PyTorch 2.3 向けなので、Colab本体とは別の環境（/content/lhm_env）を作って入れる
+#   一度終わった段階には印（/content/lhm_env/.ok_*）が残り、同じセッションで再実行すると飛ばす
+#   初回は 15〜30分ほど
 set -e
 cd /content
 step(){ echo; echo "■ $1"; }
@@ -11,9 +11,9 @@ mark(){ touch "/content/lhm_env/.ok_$1"; }
 
 nvidia-smi -L || { echo 'GPUがありません。ランタイムのタイプで L4 を選んでください'; exit 1; }
 
-if [ ! -d /content/LHM ]; then
-  step 'LHM本体をダウンロード'
-  git clone -q --depth 1 https://github.com/aigc3d/LHM.git /content/LHM
+if [ ! -d /content/LHMPP ]; then
+  step 'LHM++ 本体をダウンロード'
+  git clone -q --depth 1 https://github.com/aigc3d/LHM-plusplus.git /content/LHMPP
 fi
 
 if [ ! -x /content/lhm_env/bin/python ]; then
@@ -23,9 +23,8 @@ if [ ! -x /content/lhm_env/bin/python ]; then
 fi
 PY=/content/lhm_env/bin/python
 PIP="$PY -m pip install -q"
-export PATH=/content/lhm_env/bin:$PATH
+export PATH=/content/lhm_env/bin:/usr/local/cuda/bin:$PATH
 export CUDA_HOME=/usr/local/cuda
-export PATH=$CUDA_HOME/bin:$PATH
 export FORCE_CUDA=1
 export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9"   # A100・L4 など
 export MAX_JOBS=8
@@ -39,46 +38,45 @@ if ! done_ torch; then
 fi
 
 if ! done_ reqs; then
-  step 'LHMが使う部品を入れる（数分）'
-  cd /content/LHM
-  # torch・xformers は上で入れたものを使う（ここで入れ直さない）
-  grep -v -E '^(torch|torchvision|xformers)==' requirements.txt > /tmp/lhm_req.txt
+  step 'LHM++ が使う部品を入れる（数分）'
+  cd /content/LHMPP
+  # torch・xformers・gsplat は別に入れる（ここで入れ直さない）
+  grep -v -E '^(torch|torchvision|xformers|gsplat)==' requirements.txt > /tmp/lhm_req.txt
   $PIP --no-build-isolation -r /tmp/lhm_req.txt
-  $PY -m pip uninstall -q -y basicsr
-  $PIP --no-build-isolation git+https://github.com/XPixelGroup/BasicSR
+  $PIP "rembg[cpu]==2.0.63"
   cd /content
   mark reqs
 fi
 
-if ! done_ p3d; then
-  step 'PyTorch3D をGPU向けに組み立てる（いちばん時間がかかります。10〜20分）'
-  $PIP --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.8"
-  mark p3d
+if ! done_ ext; then
+  step '組み立て済みの部品を入れる（PyTorch3D・torch_scatter・spconv・gsplat）'
+  $PIP --no-index --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt230/download.html
+  $PIP torch_scatter -f https://data.pyg.org/whl/torch-2.3.0+cu121.html
+  $PIP spconv-cu121
+  $PIP "gsplat==1.4.0+pt23cu121" --index-url https://docs.gsplat.studio/whl/pt23cu121 \
+    || $PIP --no-build-isolation gsplat==1.4.0
+  mark ext
 fi
 
-if ! done_ gs; then
-  step '立体表示（ガウシアン）の部品を組み立てる（数分）'
-  $PIP --no-build-isolation git+https://github.com/hitsz-zuoqi/sam2/
+if ! done_ build; then
+  step 'GPU向けの部品を組み立てる（pointops・ガウシアン描画。5〜15分）'
+  $PIP --no-build-isolation /content/LHMPP/lib/pointops
   $PIP --no-build-isolation git+https://github.com/ashawkey/diff-gaussian-rasterization/
   $PIP --no-build-isolation git+https://github.com/camenduru/simple-knn/
-  mark gs
+  mark build
 fi
 
 if ! done_ prior; then
-  step 'AIの重みをダウンロード（数GB。数分）'
-  cd /content/LHM
-  if [ ! -d pretrained_models/human_model_files ]; then
-    wget -q --show-progress https://virutalbuy-public.oss-cn-hangzhou.aliyuncs.com/share/aigc3d/data/LHM/LHM_prior_model.tar
-    tar -xf LHM_prior_model.tar
-    rm -f LHM_prior_model.tar
-  fi
+  step 'AIの重み（体の形の知識など）をダウンロード（数GB・数分）'
+  cd /content/LHMPP
+  $PY scripts/download_pretrained_models.py --prior
   cd /content
   mark prior
 fi
 
 step '確認'
-$PY - <<'EOF'
-import torch, xformers, pytorch3d, diff_gaussian_rasterization, simple_knn, gsplat
+$PY - <<'PYEOF'
+import torch, xformers, pytorch3d, torch_scatter, spconv, gsplat, diff_gaussian_rasterization, simple_knn, rembg
 print('PyTorch', torch.__version__, '/ GPU', torch.cuda.get_device_name(0))
 print('準備ができました')
-EOF
+PYEOF
