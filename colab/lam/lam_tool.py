@@ -18,8 +18,11 @@ MOTION = 'assets/sample_motion/export/Look_In_My_Eyes/'
 
 def _run(cmd, cwd=None):
     """実行しながら、出てきた文字をそのまま表示する"""
-    env = dict(os.environ, PATH='/content/lam_env/bin:/usr/local/cuda/bin:' + os.environ['PATH'],
-               CUDA_HOME='/usr/local/cuda', PYTHONUNBUFFERED='1', PYTHONPATH=ROOT)
+    # GPU向けの部品はその場で組み立てることがあるので、PyTorchに合わせた CUDA 12.1 の道具を使う（lam_setup.sh で入れたもの）
+    cuda = '/content/cuda121' if os.path.exists('/content/cuda121/bin/nvcc') else '/usr/local/cuda'
+    env = dict(os.environ, PATH='/content/lam_env/bin:' + cuda + '/bin:' + os.environ['PATH'],
+               CUDA_HOME=cuda, CC='gcc-12', CXX='g++-12', NVCC_PREPEND_FLAGS='-ccbin /usr/bin/g++-12',
+               TORCH_CUDA_ARCH_LIST='8.0;8.6;8.9', PYTHONUNBUFFERED='1', PYTHONPATH=ROOT)
     env.pop('MPLBACKEND', None)
     p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     lines = []
