@@ -2,8 +2,9 @@
 #   1. 全身の「首」を探す（T字ポーズの腕より上で、いちばん細いところ）。そこから上を消す
 #   2. LAM の頭部の首（いちばん細いところ）を探し、大きさ・向き・位置を全身の首に合わせて置く
 #   3. つなぎ目の色の差をなじませる（全身の首の色を、少しずつ頭部の首の色に寄せる）
-#   使い方：python lhm_join.py 全身.ply 頭部.ply 出力.ply [scale=1] [up=0] [fwd=0] [turn=0]
+#   使い方：python lhm_join.py 全身.ply 頭部.ply 出力.ply [scale=1] [up=0] [fwd=0] [turn=0] [cut=0]
 #     scale：頭の大きさの倍率 ／ up：頭を上げる量（cm）／ fwd：頭を前に出す量（cm）／ turn：頭の向きを回す角度（度）
+#     cut：全身の頭を消す高さを、さらに下げる量（cm）。元のあごや髪が残るときに使う
 import sys, math
 import numpy as np
 
@@ -104,7 +105,7 @@ def width_profile(h, lat, lo, hi, step=0.01):
 
 
 body_path, head_path, out_path = sys.argv[1:4]
-opt = dict(scale=1.0, up=0.0, fwd=0.0, turn=0.0)
+opt = dict(scale=1.0, up=0.0, fwd=0.0, turn=0.0, cut=0.0)
 for a in sys.argv[4:]:
     k, v = a.split('=')
     opt[k] = float(v)
@@ -171,7 +172,7 @@ print(f'頭部：{len(q)} 個・首から上 {hl:.2f}・幅 {wl:.2f}・色 {"そ
 t = math.radians(opt['turn'])
 yaw = np.array([[math.cos(t), 0, math.sin(t)], [0, 1, 0], [-math.sin(t), 0, math.cos(t)]])
 R = np.stack([right_v, up_v, fwd_v], 1) @ yaw
-keep_h = hl_ >= lam_neck - 0.015 / s                       # 首の少し下まで残して、全身の首と重ねる
+keep_h = hl_ >= lam_neck - (0.015 + opt['cut'] / 100) / s   # 首の少し下まで残して、全身の首と重ねる
 Hk = take(Hd, keep_h)
 Hk['xyz'] = (R @ ((Hk['xyz'] - lam_c) * s).T).T + neck_c + up_v * opt['up'] / 100 + fwd_v * opt['fwd'] / 100
 Hk['scale'] = Hk['scale'] + math.log(s)
@@ -179,12 +180,23 @@ Hk['rot'] = quat_mul(np.tile(mat_to_quat(R), (len(Hk['rot']), 1)), Hk['rot'])
 
 # ---------- 全身の頭を消して、首の色をなじませる ----------
 near_neck = np.hypot(lat - neck_c[lat_ax], fw - neck_c[fwd_ax]) < 0.3
-Bk = take(B, ~(above & near_neck))
-hk = h[~(above & near_neck)]
+cut_h = neck_h - opt['cut'] / 100
+drop = (h > cut_h) & near_neck
+# あご：首のいちばん細いところより下まで、前に垂れ下がっている。
+#   首の下の方（のど）の前面より前に出ている点は、あごとして消す
+fo = (fw - neck_c[fwd_ax]) * fwd_sign
+throat = (h > cut_h - 0.08) & (h < cut_h - 0.05) & (np.abs(lat - neck_c[lat_ax]) < 0.06)
+if throat.sum() >= 20:
+    front = np.percentile(fo[throat], 90)
+    chin = (h > cut_h - 0.07) & (fo > front + 0.01) & (np.abs(lat - neck_c[lat_ax]) < 0.09)
+    print(f'あごとして消す点：{int((chin & ~drop).sum())} 個')
+    drop |= chin
+Bk = take(B, ~drop)
+hk = h[~drop]
 lam_neck_col = np.median(Hd['dc'][band2], 0) if band2.any() else None
 if lam_neck_col is not None:
-    seam = (hk > neck_h - 0.06) & (hk <= neck_h)
-    w = np.clip((hk[seam] - (neck_h - 0.06)) / 0.06, 0, 1)[:, None] * 0.7
+    seam = (hk > cut_h - 0.06) & (hk <= cut_h)
+    w = np.clip((hk[seam] - (cut_h - 0.06)) / 0.06, 0, 1)[:, None] * 0.7
     Bk['dc'][seam] = Bk['dc'][seam] * (1 - w) + lam_neck_col * w
 
 out = {k: np.concatenate([Bk[k], Hk[k]]) for k in ('xyz', 'dc', 'op', 'scale', 'rot')}

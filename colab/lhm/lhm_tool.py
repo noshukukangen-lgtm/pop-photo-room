@@ -204,12 +204,13 @@ def _upload_one(msg, ext='.ply'):
     return None
 
 
-def join(head=None, body=None, scale=1.0, up=0, fwd=0, turn=0):
+def join(head=None, body=None, scale=1.0, up=0, fwd=0, turn=0, cut=0):
     """全身（LHM++）の頭を、LAM の頭部に取り替えて、1人の立体人物にする
        head：頭部の番号か .ply の場所（省略すると lam_out から選ぶ）
        body：全身の .ply か、左右対称の "A"・"B"（省略すると pick_sym で選んだもの）
        うまく合わないときの調整：scale＝頭の大きさの倍率（1.1 で 1割大きく）、up＝頭を上げる cm（マイナスで下げる）、
-       fwd＝頭を前に出す cm（マイナスで後ろ）、turn＝頭の向きを回す角度（後ろを向いていたら 180）"""
+       fwd＝頭を前に出す cm（マイナスで後ろ）、turn＝頭の向きを回す角度（後ろを向いていたら 180）、
+       cut＝元の頭を消す高さを下げる cm（元のあご・髪が残るとき）"""
     from google.colab import files
     # 全身：左右対称で選んだもの → 最後に作ったもの → アップロード（body="A" / "B" で左右対称のどちらかを指定）
     if isinstance(body, str) and body.upper() in ('A', 'B') and _latest():
@@ -248,7 +249,7 @@ def join(head=None, body=None, scale=1.0, up=0, fwd=0, turn=0):
     out = os.path.join(OUT_DIR, f'{name}__{hname}_joined.ply')
     print(f'全身：{os.path.basename(body)}\n頭部：{os.path.basename(head)}\n\n■ つないでいます…')
     code, _ = _run([PY, os.path.join(HERE, 'lhm_join.py'), body, head, out,
-                    f'scale={scale}', f'up={up}', f'fwd={fwd}', f'turn={turn}'])
+                    f'scale={scale}', f'up={up}', f'fwd={fwd}', f'turn={turn}', f'cut={cut}'])
     if code != 0 or not os.path.exists(out):
         print('失敗しました。上に出ている英語のエラーを教えてください')
         return
@@ -259,7 +260,7 @@ def join(head=None, body=None, scale=1.0, up=0, fwd=0, turn=0):
         _show(f'{label}：{os.path.basename(out)}', out, mp4)
     print('\nずれていたら、数字を変えてやり直せます（例）：')
     print(f'  lhm_tool.join(head={heads.index(head) + 1 if head in heads else repr(head)}, up=2, fwd=-1, scale=1.05)')
-    print('  up＝頭を上げる cm ／ fwd＝前に出す cm ／ scale＝大きさ ／ turn＝向き（後ろ向きなら 180）')
+    print('  up＝頭を上げる cm ／ fwd＝前に出す cm ／ scale＝大きさ ／ turn＝向き（後ろ向きなら 180）／ cut＝元のあご・髪が残るとき、消す高さを下げる cm')
     try:
         files.download(out)
     except Exception:
