@@ -240,8 +240,11 @@ void main(){
   vec2 ax1 = min(sqrt(l1), 512.0) * e1;
   vec2 ax2 = min(sqrt(l2), 512.0) * vec2(e1.y, -e1.x);
   vColor = texelFetch(uColor, at(i), 0);
-  vPos = position.xy;
-  vec2 ndc = clip.xy / clip.w + (position.x * ax1 + position.y * ax2) * 2.0 / uViewport;
+  // 薄い玉ほど、見える範囲が狭いので四角を小さくする（近づいたときに描く量が減って軽くなる）
+  float k = min(3.0, sqrt(max(0.0, 2.0 * log(vColor.a * 255.0))));
+  if (k < 0.3){ gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
+  vPos = position.xy * (k / 3.0);
+  vec2 ndc = clip.xy / clip.w + (vPos.x * ax1 + vPos.y * ax2) * 2.0 / uViewport;
   gl_Position = vec4(ndc * clip.w, clip.z, clip.w);
 }`;
 const FRAG = `
@@ -373,6 +376,32 @@ function makeSplatMesh(d){
   };
   return mesh;
 }
+
+// 近づいたときは、視界の端の細かさを少し落として軽くする（Questの「中心だけ細かく描く」機能）
+//   目で見ている真ん中はそのまま。人物から 1.3m 以上離れたら元に戻す
+const _xp = new THREE.Vector3(), _pp = new THREE.Vector3();
+let foveated = false;
+const origRenderS = renderer.render.bind(renderer);
+renderer.render = (s, c) => {
+  if (renderer.xr.isPresenting){
+    let near = Infinity;
+    if (people.length){
+      _xp.setFromMatrixPosition(renderer.xr.getCamera().matrixWorld);
+      for (const m of people){
+        if (!m.visible) continue;
+        m.getWorldPosition(_pp);
+        const dy = Math.max(0, _pp.y - _xp.y, _xp.y - (_pp.y + m.userData.h * m.scale.y));
+        near = Math.min(near, Math.hypot(_pp.x - _xp.x, _pp.z - _xp.z, dy));
+      }
+    }
+    const want = near < 1.3;
+    if (want !== foveated){
+      foveated = want;
+      try { renderer.xr.setFoveation(want ? 1 : 0); } catch (e) {}
+    }
+  }
+  origRenderS(s, c);
+};
 
 // =====================================================================
 // 部屋に置く：見えない箱（つかむ・吸い付き用）の中に、立体人物を入れる
