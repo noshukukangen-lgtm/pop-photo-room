@@ -35,9 +35,29 @@ if [ ! -x /content/lam_env/bin/python ]; then
 fi
 PY=/content/lam_env/bin/python
 PIP="$PY -m pip install -q"
-export PATH=/content/lam_env/bin:/usr/local/cuda/bin:$PATH
-export CUDA_HOME=/usr/local/cuda
+export PATH=/content/lam_env/bin:$PATH
 export FORCE_CUDA=1
+
+# Colab の CUDA は 13 だが、PyTorch 2.3 は CUDA 12.1 向け。版が違うとGPU向けの部品を組み立てられないので、
+# CUDA 12.1 の組み立て道具（と、それに対応する gcc 12）を別に入れて、そちらを使う
+if [ ! -x /content/cuda121/bin/nvcc ]; then
+  step 'CUDA 12.1 の組み立て道具を入れる（PyTorchの版に合わせるため。数分）'
+  apt-get -qq update > /dev/null && apt-get -qq install -y gcc-12 g++-12 > /dev/null
+  [ -x /content/bin/micromamba ] || curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj -C /content bin/micromamba
+  /content/bin/micromamba create -y -q -p /content/cuda121 -c nvidia/label/cuda-12.1.1 \
+    cuda-nvcc cuda-cudart-dev cuda-cccl cuda-nvrtc-dev cuda-nvtx cuda-profiler-api \
+    libcublas-dev libcusparse-dev libcusolver-dev libcurand-dev > /dev/null
+  # 部品の置き場所を、PyTorch が探すいつもの場所（include・lib64）にもそろえる
+  for sub in include lib; do
+    [ -d /content/cuda121/targets/x86_64-linux/$sub ] && cp -rsn /content/cuda121/targets/x86_64-linux/$sub/. /content/cuda121/$sub/ 2>/dev/null || true
+  done
+  [ -e /content/cuda121/lib64 ] || ln -s /content/cuda121/lib /content/cuda121/lib64
+fi
+export CUDA_HOME=/content/cuda121
+export PATH=/content/cuda121/bin:$PATH
+export CC=gcc-12 CXX=g++-12 CUDAHOSTCXX=g++-12
+export NVCC_PREPEND_FLAGS='-ccbin /usr/bin/g++-12'
+echo "（組み立ての道具：$(nvcc --version | tail -1) / $(g++-12 --version | head -1)）"
 export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9"   # A100・L4 など
 export MAX_JOBS=8
 
@@ -57,7 +77,6 @@ build(){
     exit 1
   fi
 }
-echo "（組み立ての道具：$(nvcc --version | tail -1) / $(gcc --version | head -1)）"
 
 if ! done_ torch; then
   step 'PyTorch 2.3 を入れる（数分）'
