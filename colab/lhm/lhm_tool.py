@@ -142,6 +142,47 @@ def start(name=None):
         print(f'自動ダウンロードできませんでした：左のフォルダの lhm_out から {os.path.basename(ply)} を右クリックでダウンロード')
 
 
+def _latest():
+    plys = [p for p in glob.glob(os.path.join(OUT_DIR, '*_lhm.ply'))]
+    return max(plys, key=os.path.getmtime) if plys else None
+
+
+def symmetrize(ply=None):
+    """横向きの写真で、片側の色がおかしいとき：よく写っている側の色を反対側へ写して、左右対称にする
+       形はそのまま、色だけ変える。どちらの側が良いか分からないので A・B の2通り作って見比べる"""
+    ply = ply or _latest()
+    if not ply:
+        print('先に「立体人物を作る」を実行してください')
+        return
+    a, b = ply.replace('.ply', '_symA.ply'), ply.replace('.ply', '_symB.ply')
+    print('■ 左右対称にしています…')
+    code, _ = _run([PY, os.path.join(HERE, 'lhm_sym.py'), ply, a, b])
+    if code != 0:
+        print('失敗しました。上に出ている英語のエラーを教えてください')
+        return
+    for label, p in (('A', a), ('B', b)):
+        mp4 = p.replace('.ply', '_turn.mp4')
+        print(f'\n■ {label} の確認動画を作っています')
+        _run([PY, os.path.join(HERE, 'lhm_preview.py'), p, mp4])
+        _show(f'{label}：{os.path.basename(p)}', p, mp4)
+    print('\n良い方を選んで保存：lhm_tool.pick_sym("A") か lhm_tool.pick_sym("B")')
+    print('（体の模様・かばん・髪の分け目など、左右で違うものも鏡写しになります）')
+
+
+def pick_sym(which, ply=None):
+    """symmetrize で作った A か B をダウンロードする"""
+    from google.colab import files
+    ply = ply or _latest()
+    p = ply.replace('.ply', f'_sym{which.upper()}.ply')
+    if not os.path.exists(p):
+        print('先に lhm_tool.symmetrize() を実行してください')
+        return
+    try:
+        files.download(p)
+    except Exception:
+        print(f'自動ダウンロードできませんでした：左のフォルダの lhm_out から {os.path.basename(p)} を右クリックでダウンロード')
+
+
 def flip_preview(ply):
     """確認動画の人が逆さまだったら、これで作り直す"""
     mp4 = ply.replace('.ply', '_turn.mp4')
