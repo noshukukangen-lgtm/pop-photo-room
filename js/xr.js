@@ -91,7 +91,7 @@ A.drawPanel = () => {
     if (r.type === 'num' || r.type === 'cycle') g.fillText(r.p.label, 36, cy);
     if (r.type === 'cutall') g.fillText('切り抜き（全部）', 36, cy);
     if (r.type === 'arrange') g.fillText('並べ直す（人の大きさ）', 36, cy);
-    if (r.type === 'clear') g.fillText(`写真（${photos.length} 枚）`, 36, cy);
+    if (r.type === 'clear') g.fillText(`写真（${photos.length} 枚）` + ((A.people || []).length ? `・人物 ${A.people.length}` : ''), 36, cy);
     if (r.type === 'num'){
       g.textAlign = 'right'; g.fillStyle = '#7cf'; g.font = 'bold 38px sans-serif';
       g.fillText(r.p.fmt(settings[r.p.key]), 640, cy);
@@ -190,7 +190,7 @@ const controllers = [0,1].map(i => {
       const ph = raycaster.intersectObject(panel, false)[0];
       if (ph){ clickPanel(ph); buzz(c, 0.3, 30); return; }
     }
-    const hit = raycaster.intersectObjects(photos, false)[0];
+    const hit = raycaster.intersectObjects([...photos, ...(A.people || [])], false)[0];
     if (!hit) return;
     A.autoArranged = false;
     const other = controllers[1 - i];
@@ -261,6 +261,7 @@ function updatePanelHover(){
 
 // ===== 写真の削除 =====
 function disposePhoto(m){
+  if (m.userData.splat){ A.disposePerson(m); return; }   // 立体人物（splat.js）
   m.parent && m.parent.remove(m);
   const texs = new Set();
   for (const mat of [m.material, m.userData.back.material]){
@@ -293,6 +294,7 @@ function deleteHeld(c){
 function removeAllPhotos(){
   A.releaseAll();
   [...photos].forEach(disposePhoto);
+  [...(A.people || [])].forEach(disposePhoto);
   A.status.textContent = '写真を全部消しました。';
   A.drawPanel();
 }

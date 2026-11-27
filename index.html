@@ -59,6 +59,7 @@
 <div id="ui">
   <label class="pick">写真 <input type="file" id="files" accept="image/*" multiple></label>
   <label class="pick">動画（ループ・VR180） <input type="file" id="videos" accept="video/webm,video/*" multiple></label>
+  <label class="pick">立体人物（.ply） <input type="file" id="plys" multiple></label>
   <span id="ver"></span>
   <div style="margin-top:8px">
     <label>切り抜きAI
@@ -86,6 +87,7 @@
     VRに入ると、写真は人の大きさで自分の前に並びます。<b>大きさは、写真の中で一番大きい顔が実物大になるように決めます</b>（顔が見つからない写真は、全身1.6m・上半身0.9m）。全身の写真は床に立ちます（調整パネルの「取り囲む」でいつでも並べ直し）<br>
     <b>写真はゆっくりこちらを向きます</b>（調整パネルの「こっちを向く」で強さを変更、0%で止まります。壁・床・天井に貼った写真は回りません）。写真の人は、呼吸するように少しだけ動きます<br>
     <b>壁・床・天井の近くで、光線が緑になったところで離すと、ピタッと吸い付きます</b>（Questの設定で部屋のスキャンが必要。最初に空間データの許可を聞かれたら「許可」）<br>
+    <b>立体人物</b>：Colabの LHM++・LAM で作った「〜.ply」を選ぶと、ぐるっと回り込んで見られる立体の人が、自分の 1.5m 前の床に立ちます（実物大）。つかんで移動・両手で拡大縮小は写真と同じ。<b>つかんで A・X：上下さかさまを直す</b><br>
     <b>写真・動画と置いた場所は、このブラウザの中に自動で保存されます</b>（ネットには上がりません）。次に開くと、前に置いた場所に戻ります。消すときは調整パネルの「全部消す」か、つかんでスティック押し込み
   </div>
   <div id="status">読み込み中…</div>
@@ -117,7 +119,7 @@ try {
   if (/^[\w.-]{1,40}$/.test(t)) V = t;
 } catch (e) {}
 document.getElementById('ver').textContent = '版 ' + V;
-for (const f of ['core', 'ai', 'photo', 'load', 'planes', 'xr', 'storage', 'face', 'follow', 'video', 'idle']){
+for (const f of ['core', 'ai', 'photo', 'load', 'planes', 'xr', 'storage', 'face', 'follow', 'video', 'idle', 'splat']){
   await import(`./js/${f}.js?v=${V}`);
 }
 window.appStarted = true;

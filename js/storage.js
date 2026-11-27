@@ -83,14 +83,14 @@ async function getAnchor(session, frame, ref){
     }
     // 目印を作り直したときは、今見えている位置を新しい目印からの位置として保存し直す
     MaInv.identity();
-    photos.forEach(m => m.userData.saveKey = '');
+    [...photos, ...(A.people || [])].forEach(m => m.userData.saveKey = '');
   } catch (e) { A.note('部屋の目印を作れませんでした：' + (e.message || e)); }
 }
 
 // 保存してあった「目印からの位置」に写真を置く
 function placeFromSaved(){
   const M = new THREE.Matrix4();
-  for (const m of photos){
+  for (const m of [...photos, ...(A.people || [])]){
     if (!m.userData.rel) continue;
     M.fromArray(m.userData.rel).premultiply(Ma);
     M.decompose(m.position, m.quaternion, m.scale);
@@ -144,6 +144,9 @@ function poseOf(m){
   return new THREE.Matrix4().compose(m.position, m.userData.baseQ || m.quaternion, m.scale);
 }
 const relOf = m => new THREE.Matrix4().multiplyMatrices(MaInv, poseOf(m)).toArray();
+// 立体人物（splat.js）も同じ目印からの位置で保存する
+A.relOf = relOf;
+A.canSaveRel = () => !renderer.xr.isPresenting || anchorReady || !localStorage.getItem(ANCHOR_KEY);
 const keyOf = m => poseOf(m).elements.map(v => v.toFixed(3)).join(',') +
   (m.userData.cut ? 'c' : '') + (m.userData.pinned ? 'p' : '');
 
