@@ -304,6 +304,7 @@ function makeSplatMesh(d){
     transparent: true,
     depthWrite: false,
     depthTest: true,
+    side: THREE.DoubleSide,   // 楕円の向き次第で四角が裏返るので、裏向きも描く（片面だと消えてしまう）
   });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.frustumCulled = false;
