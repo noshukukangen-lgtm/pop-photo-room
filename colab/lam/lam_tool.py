@@ -4,7 +4,8 @@
 #   できるもの：一周回る確認動画、見本の表情で話して動く動画、頭部の立体（〜_lam.ply）
 #   あとで全身（LHM++）とつなぐときに使うので、頭部の形（〜_lam_mesh.obj）も一緒に保存する
 #   refine()：正面写真＋同じ人の別の写真（横顔・斜め・別の表情）で、LAMの頭部を磨く（lam_refine.py）
-#   choose(回数)：磨いた途中の回（100・200・400…）のうち、いちばん良い回を選ぶ
+#   choose(回数)：磨いた途中の回のうち、いちばん良い回を選ぶ
+#   ※磨くときは「頭部を作る」を先にやる必要はない（磨く中で同じことをする）。頭部を作るは、正面写真選びや写真が1枚の人用
 import os, glob, shutil, subprocess, base64, time
 
 ROOT = '/content/LAM'
@@ -158,7 +159,7 @@ def _save_jpgs(up, prefix):
     return out
 
 
-def refine(iters=800):
+def refine(iters=150):
     """正面写真1枚＋同じ人の別の写真（同じ日・同じ髪型。横顔・斜め・別の表情があるほど良い）で、頭部を磨く"""
     from google.colab import files
     from IPython.display import display, Image as IPImage
@@ -173,7 +174,7 @@ def refine(iters=800):
     if not main:
         print('写真がありません')
         return
-    print('② 同じ人の別の写真を選んでください（同じ日・同じ髪型。横顔・斜め・別の表情など。Ctrlを押しながら何枚でも選べます）')
+    print('② 同じ人の別の写真を選んでください（同じ日・同じ髪型。横顔・斜め・別の表情など。Ctrlを押しながら何枚でも選べます。首を大きく傾けた写真は避ける）')
     extra = _save_jpgs(files.upload(), 'x_')
     if not extra:
         print('別の写真がないので、磨けません')
@@ -194,15 +195,20 @@ def refine(iters=800):
         print('\n磨けませんでした。上に出ている英語のエラー（Traceback の下の10行くらい）を教えてください')
         return
     turn = ply.replace('.ply', '_turn.mp4')
-    print('\n■ 一周回る確認動画を作っています')
+    print('\n■ 一周回る確認動画を作っています（磨く前と磨いた後）')
     _run([PY, os.path.join(HERE, 'gs_preview.py'), ply, turn, '0', 'rgb'])
+    before = os.path.join(OUT_DIR, f'{name}_lam_before.ply')
+    turn0 = before.replace('.ply', '_turn.mp4')
+    if os.path.exists(before):
+        _run([PY, os.path.join(HERE, 'gs_preview.py'), before, turn0, '0', 'rgb'])
     print(f'\n完了しました（{(time.time() - t0) / 60:.0f}分）')
     cmp = os.path.join(OUT_DIR, f'{name}_compare.jpg')
     if os.path.exists(cmp):
         leg = os.path.join(OUT_DIR, f'{name}_compare.txt')
         print('左から：' + (open(leg).read() if os.path.exists(leg) else '写真｜磨く前｜磨いた後') + '（1行目が正面写真）')
-        print('いちばん良い回があれば、lam_tool.choose(回数) でその回の頭部を選べます（例：lam_tool.choose(200)）')
+        print(f'いちばん良い回があれば、lam_tool.choose(回数) でその回の頭部を選べます（例：lam_tool.choose({max(1, iters * 2 // 3)})）')
         display(IPImage(filename=cmp, width=960))
+    _video(turn0, f'{name}：磨く前・ぐるっと一周')
     _video(turn, f'{name}：磨いた後・ぐるっと一周')
     _video(ply.replace('.ply', '_talk.mp4'), f'{name}：磨いた後・見本の表情で動かしたもの')
     try:
@@ -212,11 +218,11 @@ def refine(iters=800):
 
 
 def choose(it, name=None):
-    """磨いた途中の回（100・200・400…）の頭部を選んで、一周の動画を作ってダウンロードする"""
+    """磨いた途中の回（比べる画像に並んだ回）の頭部を選んで、一周の動画を作ってダウンロードする"""
     from google.colab import files
     hits = sorted(glob.glob(os.path.join(OUT_DIR, f'{name or "*"}_lam_refined_{it}.ply')), key=os.path.getmtime)
     if not hits:
-        print(f'{it}回の結果が見つかりません（100・200・400・最後の回から選べます）')
+        print(f'{it}回の結果が見つかりません（比べる画像の上に出ている回数から選べます）')
         return
     ply = hits[-1]
     turn = ply.replace('.ply', '_turn.mp4')

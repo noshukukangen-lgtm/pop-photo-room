@@ -13,7 +13,10 @@
 #       そこに合わせようとして点が筋状に引き伸ばされないよう、くらべる範囲から外す
 #     ・点の移動は最大5mm、大きさは1.5倍までに制限（筋状に伸びるのを防ぐ）
 #     ・写真ごとの明るさ・色合いの違いは、写真ごとの補正で吸収する（顔の色に混ぜない）
-#     ・途中（100・200・400回…）の結果も残し、写真｜磨く前｜100回｜200回…と並べて、いちばん良い回を選べる
+#     ・途中（全体の1/3・2/3・最後）の結果も残し、写真｜磨く前｜…と並べて、いちばん良い回を選べる
+#     ・髪は動かさず、顔（前から見える肌の部分）だけを磨く。首を傾けると髪の垂れ方が写真ごとに変わり、
+#       そこに合わせようとすると髪や頬に筋が出るため。くらべる範囲も顔だけにする
+#     ・「磨く前」の時点で顔の向きの読み取りが大きくずれている写真は、自動で使わない
 #   できるもの：〜_lam_refined.ply、比べる画像（写真｜磨く前｜磨いた後）、見本の表情で動かした動画
 import os, sys, math, time, glob
 import numpy as np
@@ -25,7 +28,7 @@ MAIN = os.environ['REFINE_MAIN']
 EXTRA = [p for p in os.environ.get('REFINE_EXTRA', '').split(',') if p]
 OUT = os.environ['REFINE_OUT']
 NAME = os.environ.get('REFINE_NAME', 'head')
-ITERS = int(os.environ.get('REFINE_ITERS', '800'))
+ITERS = int(os.environ.get('REFINE_ITERS', '150'))
 MOTION = 'assets/sample_motion/export/Look_In_My_Eyes/'
 os.makedirs(OUT, exist_ok=True)
 
@@ -111,6 +114,15 @@ xyz0, col0 = gs0.xyz.detach().clone(), gs0.shs.detach().clone()
 
 # 動かすもの：点の位置のずれ・色・濃さ・大きさ・向き ＋ 写真ごとの顔の向き・位置・表情の小さな直し
 MAX_MOVE = 0.005                                                    # 点の移動は最大5mm
+# 顔の点：顔の形（FLAME）の上で、前を向いた中央の部分（目・鼻・口・頬・あご）。髪や耳・後頭部は動かさない
+base = xyz0 - gs0.offset                                            # 点がくっついている顔の形の位置
+zmax = base[:, 2].max()
+cx = base[:, 0].median()
+hsz = (base[:, 1].max() - base[:, 1].min()).clamp_min(1e-6)        # 頭（首まで）の高さ。大きさの単位によらないように比で決める
+face = ((base[:, 2] > zmax - 0.28 * hsz) & ((base[:, 0] - cx).abs() < 0.28 * hsz)).float()[:, None]
+lum = (col0.reshape(col0.shape[0], -1)[:, :3] * torch.tensor([0.3, 0.59, 0.11], device=dev)).sum(-1, keepdim=True)
+face = face * (lum > 0.18).float()                                  # 顔の中でも、暗い前髪は動かさない（眉・目は残る程度に）
+print(f'  磨く点：{int(face.sum())} / {face.shape[0]}（顔の部分だけ）')
 lsc0 = torch.log(gs0.scaling.detach().clamp_min(1e-8))
 d_raw = torch.zeros_like(xyz0, requires_grad=True)
 col = col0.clone().requires_grad_(True)
@@ -129,10 +141,16 @@ opt = torch.optim.Adam([
     dict(params=[f['gain'] for f in fix[1:]] + [f['bias'] for f in fix[1:]], lr=3e-3)])
 
 
+op0 = torch.logit(gs0.opacity.detach().clamp(1e-4, 1 - 1e-4))
+rot0 = gs0.rotation.detach()
+
+
 def model_now():
-    d_xyz = MAX_MOVE * torch.tanh(d_raw)
-    return GaussianModel(xyz=xyz0 + d_xyz, opacity=torch.sigmoid(op), rotation=F.normalize(rot, dim=-1),
-                         scaling=torch.exp(lsc0 + d_sc.clamp(-1.0, math.log(1.5))), shs=col.clamp(0, 1),
+    d_xyz = MAX_MOVE * torch.tanh(d_raw) * face
+    c = col0 + (col - col0) * face.view(-1, *([1] * (col0.dim() - 1)))
+    return GaussianModel(xyz=xyz0 + d_xyz, opacity=torch.sigmoid(op0 + (op - op0) * face),
+                         rotation=F.normalize(rot0 + (rot - rot0) * face, dim=-1),
+                         scaling=torch.exp(lsc0 + d_sc.clamp(-1.0, math.log(1.5)) * face), shs=c.clamp(0, 1),
                          offset=gs0.offset)
 
 
@@ -149,13 +167,27 @@ def render(gs, v, f=None):
 
 with torch.no_grad():
     before, regions = [], []
+    # 顔の点だけを白く描いた絵を作り、写真ごとの「顔が写っている範囲」にする
+    gs_face = GaussianModel(xyz=gs0.xyz, opacity=gs0.opacity, rotation=gs0.rotation, scaling=gs0.scaling,
+                            shs=face.expand(-1, 3).reshape(gs0.shs.shape).clone(), offset=gs0.offset)
     for v in views:
         rgb_b, m_b = render(gs0, v)
         before.append(rgb_b.clamp(0, 1))
-        # くらべる範囲：磨く前の頭が写っている所を少し広げたもの × 写真で人が写っている所
-        reg_ = F.max_pool2d((m_b.permute(2, 0, 1)[None] > 0.3).float(), 15, stride=1, padding=7)[0].permute(1, 2, 0)
+        fr = render(gs_face, v)[0].mean(-1, keepdim=True)            # 顔の部分ほど白い（背景は白なので、頭の外は除く）
+        reg_ = ((fr > 0.7) & (m_b > 0.5)).float()
+        reg_ = 1 - F.max_pool2d(1 - reg_.permute(2, 0, 1)[None], 5, stride=1, padding=2)[0].permute(1, 2, 0)   # 少し内側だけ
         regions.append(reg_ * (v['mask'] > 0.5).float())
-SNAPS = sorted({k for k in (100, 200, 400, ITERS) if k <= ITERS})
+    # 「磨く前」の時点で顔が大きくずれている写真は使わない（顔の向きの読み取りの失敗）
+    errs = [((b - v['rgb']).abs() * R_).sum().item() / (R_.sum().item() * 3 + 1) for b, v, R_ in zip(before, views, regions)]
+    keep = [0] + [i for i in range(1, len(views)) if errs[i] < max(0.12, errs[0] * 2.5) and regions[i].sum() > 500]
+    for i in range(1, len(views)):
+        if i not in keep:
+            print(f'  {i + 1}枚目：顔の向きの読み取りが合っていないので使いません（ずれ {errs[i]:.3f}）')
+    views = [views[i] for i in keep]
+    before = [before[i] for i in keep]
+    regions = [regions[i] for i in keep]
+fix = [fix[i] for i in keep] if len(fix) != len(views) else fix
+SNAPS = sorted({max(1, ITERS // 3), max(1, ITERS * 2 // 3), ITERS})
 snaps = {}
 
 print(f'■ {len(views)} 枚の写真に合うように磨いています（{ITERS} 回）')
@@ -203,6 +235,7 @@ with torch.no_grad():
     for k in SNAPS:
         g = snaps[k][0]
         g.save_ply(os.path.join(OUT, f'{NAME}_lam_refined_{k}.ply'), rgb2sh=False, offset2xyz=False)
+    gs0.save_ply(os.path.join(OUT, f'{NAME}_lam_before.ply'), rgb2sh=False, offset2xyz=False)
     final = snaps[SNAPS[-1]][0]
     final.save_ply(os.path.join(OUT, f'{NAME}_lam_refined.ply'), rgb2sh=False, offset2xyz=False)
     off = final.offset
