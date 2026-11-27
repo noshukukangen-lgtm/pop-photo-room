@@ -8,7 +8,9 @@ OUT = '/content/tryon_out'
 os.makedirs(OUT, exist_ok=True)
 
 # うまくいきやすい指示の例（控えめな変更ほど成功しやすい）
+# 今の服には触れず、着せたい服だけを書くと、元が何を着ていても替わる
 EXAMPLES = {
+    '服を着せる': 'Dress the person in a fitted plain T-shirt and slim jeans. Keep the face, hair, pose, body shape and background exactly the same.',
     'ズボン': 'Change the skirt to slim black trousers. Keep the face, hair, pose, body shape and background exactly the same.',
     'Tシャツ': 'Change the top to a plain fitted white T-shirt. Keep the face, hair, pose, body shape and background exactly the same.',
     '上下ぴったり': 'Change the clothes to a fitted plain T-shirt and slim jeans. Keep the face, hair, pose, body shape and background exactly the same.',
@@ -17,6 +19,7 @@ EXAMPLES = {
 }
 
 # 服の着せ替え以外の指示は受け付けない（家族写真用の安全策）
+# 元が水着の写真でも、今の服には触れず「服を着せる」の書き方なら使える
 NG_WORDS = ['nude','naked','bikini','swimsuit','lingerie','underwear','topless','sexy','裸','水着','下着','セクシー']
 
 _pipe = None
@@ -58,7 +61,7 @@ def _check(prompt):
     low = prompt.lower()
     for w in NG_WORDS:
         if w in low:
-            raise ValueError('このツールは服を替える用途だけです（指示に使えない言葉: ' + w + '）')
+            raise ValueError('このツールは服を着せる用途だけです（指示に使えない言葉: ' + w + '）。今の服には触れず、着せたい服だけを書いてください（例: 「服を着せる」）')
 
 def _open(path, long_side=1024):
     im = ImageOps.exif_transpose(Image.open(path)).convert('RGB')
