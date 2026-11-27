@@ -137,7 +137,24 @@ function parsePly(buf){
     C[m * 4] = cl(r); C[m * 4 + 1] = cl(g); C[m * 4 + 2] = cl(b); C[m * 4 + 3] = cl(op);
     m++;
   }
-  return { n: m, P: P.subarray(0, m * 3), S: S.subarray(0, m * 6), C: C.subarray(0, m * 4), rgbMode, total: n };
+  return capSplats({ n: m, P: P.subarray(0, m * 3), S: S.subarray(0, m * 6), C: C.subarray(0, m * 4), rgbMode, total: n });
+}
+
+// 玉が多すぎると Quest では重いので、目立たない玉（薄くて小さいもの）から減らす
+const MAX_SPLATS = 250000;
+function capSplats(d){
+  if (d.n <= MAX_SPLATS) return d;
+  const { n, P, S, C } = d;
+  const score = new Float32Array(n);
+  for (let i = 0; i < n; i++) score[i] = C[i * 4 + 3] * Math.sqrt(S[i * 6] + S[i * 6 + 3] + S[i * 6 + 5]);
+  const keep = Array.from({ length: n }, (_, i) => i).sort((a, b) => score[b] - score[a]).slice(0, MAX_SPLATS).sort((a, b) => a - b);
+  const m = keep.length, P2 = new Float32Array(m * 3), S2 = new Float32Array(m * 6), C2 = new Uint8Array(m * 4);
+  keep.forEach((i, j) => {
+    P2.set(P.subarray(i * 3, i * 3 + 3), j * 3);
+    S2.set(S.subarray(i * 6, i * 6 + 6), j * 6);
+    C2.set(C.subarray(i * 4, i * 4 + 4), j * 4);
+  });
+  return { ...d, n: m, P: P2, S: S2, C: C2, reduced: n };
 }
 
 // =====================================================================
@@ -314,14 +331,16 @@ function makeSplatMesh(d){
   // 並べ替え係
   const worker = new Worker(sorterURL);
   worker.postMessage({ pos: new Float32Array(P) });
-  let busy = false, lastRow = null, spare = null, sortId = 0;
+  let busy = false, spare = null, sortId = 0;
   worker.onmessage = e => {
     busy = false;
-    idx.array.set(e.data.order);
+    // 受け取った並びをそのまま使い、古い方は次の並べ替えに回す（写し替えの手間をなくす）
+    spare = idx.array;
+    idx.array = e.data.order;
     idx.needsUpdate = true;
-    spare = e.data.order;
   };
-  let lastFrame = -1;
+  let lastFrame = -1, lastSortT = 0;
+  const lastCam = new THREE.Vector3(1e9, 0, 0), lastDir = new THREE.Vector3(), nowCam = new THREE.Vector3(), nowDir = new THREE.Vector3();
   mesh.onBeforeRender = (r, sc, cam) => {
     // 見ている目の画面の大きさ（VRでは片目ぶん）
     if (cam.viewport) _vp.set(cam.viewport.z, cam.viewport.w);
@@ -329,15 +348,20 @@ function makeSplatMesh(d){
     mat.uniforms.uViewport.value.copy(_vp);
     mat.uniformsNeedUpdate = true;
     // 1フレームに1回、見る位置が変わっていたら並べ替えを頼む
+    //   頭はいつも少し揺れているので、3cm以上動いたか 3°以上向きが変わったときだけ。間隔も 0.1秒以上あける
     const f = r.info.render.frame;
     if (f === lastFrame || busy) return;
     lastFrame = f;
+    const now = performance.now();
+    if (now - lastSortT < 100) return;
     _mv.multiplyMatrices(cam.matrixWorldInverse, mesh.matrixWorld);
     const e = _mv.elements;
+    nowCam.setFromMatrixPosition(cam.matrixWorld);
+    mesh.worldToLocal(nowCam);
+    nowDir.set(e[2], e[6], e[10]).normalize();
+    if (nowCam.distanceTo(lastCam) < 0.03 && nowDir.dot(lastDir) > 0.9986) return;
+    lastCam.copy(nowCam); lastDir.copy(nowDir); lastSortT = now;
     const row = [e[2], e[6], e[10], e[14]];
-    if (lastRow && Math.abs(row[0] - lastRow[0]) + Math.abs(row[1] - lastRow[1]) + Math.abs(row[2] - lastRow[2]) < 0.002 &&
-        Math.abs(row[3] - lastRow[3]) < 0.003) return;
-    lastRow = row;
     busy = true;
     const msg = { row, id: ++sortId };
     if (spare){ msg.buf = spare; worker.postMessage(msg, [spare.buffer]); spare = null; }
@@ -436,7 +460,7 @@ async function loadPly(file, label){
   const d = parsePly(buf);
   if (!d.n) throw new Error('見える点がありませんでした');
   const info = normalize(d);
-  A.note(`${label}：${file.name}（${d.n.toLocaleString()} 個の玉・高さ ${(info.h * 100).toFixed(0)}cm・色 ${d.rgbMode ? 'そのまま' : 'SH'}${info.head ? '・頭部' : ''}）`);
+  A.note(`${label}：${file.name}（${d.n.toLocaleString()} 個の玉${d.reduced ? `（${d.reduced.toLocaleString()} 個から軽くしました）` : ''}・高さ ${(info.h * 100).toFixed(0)}cm・色 ${d.rgbMode ? 'そのまま' : 'SH'}${info.head ? '・頭部' : ''}）`);
   const root = buildPerson(d, info, null);
   root.userData.id = 's' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
   const rec = { id: root.userData.id, name: file.name, ply: new Blob([buf]), flipped: false,
