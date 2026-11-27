@@ -29,6 +29,24 @@ export FORCE_CUDA=1
 export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9"   # A100・L4 など
 export MAX_JOBS=8
 
+# GPU向けの部品を、ソースを手元に置いてから組み立てる。失敗したら原因が分かるように記録の最後を表示する
+build(){
+  local name=$1 url=$2 d=/content/build_$1
+  [ -d "$d" ] || git clone -q --recursive "$url" "$d"
+  case $name in
+    simple-knn) grep -q '<cfloat>' "$d/simple_knn.cu" || sed -i '1i #include <cfloat>' "$d/simple_knn.cu" ;;
+    diff-gauss) grep -q '<cstdint>' "$d/cuda_rasterizer/rasterizer_impl.h" || sed -i '1i #include <cstdint>' "$d/cuda_rasterizer/rasterizer_impl.h" ;;
+  esac
+  if ! $PY -m pip install --no-build-isolation -v "$d" > "/content/build_$name.log" 2>&1; then
+    echo "「$name」の組み立てに失敗しました。記録の最後："
+    grep -iE 'error|nvcc fatal|unsupported' "/content/build_$name.log" | grep -v 'Werror' | tail -15
+    echo '----'
+    tail -25 "/content/build_$name.log"
+    exit 1
+  fi
+}
+echo "（組み立ての道具：$(nvcc --version | tail -1) / $(gcc --version | head -1)）"
+
 if ! done_ torch; then
   step 'PyTorch 2.3 を入れる（数分）'
   $PIP torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 --index-url https://download.pytorch.org/whl/cu121
@@ -64,8 +82,8 @@ fi
 if ! done_ build; then
   step 'GPU向けの部品を組み立てる（pointops・ガウシアン描画。5〜15分）'
   $PIP --no-build-isolation /content/LHMPP/lib/pointops
-  $PIP --no-build-isolation git+https://github.com/ashawkey/diff-gaussian-rasterization/
-  $PIP --no-build-isolation git+https://github.com/camenduru/simple-knn/
+  build diff-gauss https://github.com/ashawkey/diff-gaussian-rasterization.git
+  build simple-knn https://github.com/camenduru/simple-knn.git
   mark build
 fi
 
