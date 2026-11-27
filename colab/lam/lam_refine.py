@@ -9,6 +9,11 @@
 #     3. 頭部の点（位置・色・大きさ・向き・濃さ）を、すべての写真の見た目に合うように少しずつ動かす
 #        写真ごとの顔の向きと表情の読み取りのずれも、一緒に少し直す
 #        写っていない所が崩れないよう、出発点から離れすぎないようにおさえる
+#     ・くらべるのは「頭のまわりだけ」。肩・手・背景（クッションなど）は頭部の立体では作れないので、
+#       そこに合わせようとして点が筋状に引き伸ばされないよう、くらべる範囲から外す
+#     ・点の移動は最大5mm、大きさは1.5倍までに制限（筋状に伸びるのを防ぐ）
+#     ・写真ごとの明るさ・色合いの違いは、写真ごとの補正で吸収する（顔の色に混ぜない）
+#     ・途中（100・200・400回…）の結果も残し、写真｜磨く前｜100回｜200回…と並べて、いちばん良い回を選べる
 #   できるもの：〜_lam_refined.ply、比べる画像（写真｜磨く前｜磨いた後）、見本の表情で動かした動画
 import os, sys, math, time, glob
 import numpy as np
@@ -105,23 +110,30 @@ gs0 = gs_list[0]
 xyz0, col0 = gs0.xyz.detach().clone(), gs0.shs.detach().clone()
 
 # 動かすもの：点の位置のずれ・色・濃さ・大きさ・向き ＋ 写真ごとの顔の向き・位置・表情の小さな直し
-d_xyz = torch.zeros_like(xyz0, requires_grad=True)
+MAX_MOVE = 0.005                                                    # 点の移動は最大5mm
+lsc0 = torch.log(gs0.scaling.detach().clamp_min(1e-8))
+d_raw = torch.zeros_like(xyz0, requires_grad=True)
 col = col0.clone().requires_grad_(True)
 op = torch.logit(gs0.opacity.detach().clamp(1e-4, 1 - 1e-4)).clone().requires_grad_(True)
-lsc = torch.log(gs0.scaling.detach().clamp_min(1e-8)).clone().requires_grad_(True)
+d_sc = torch.zeros_like(lsc0, requires_grad=True)
 rot = gs0.rotation.detach().clone().requires_grad_(True)
 fix = [dict(rot=torch.zeros(3, device=dev, requires_grad=True), tr=torch.zeros(3, device=dev, requires_grad=True),
-            ex=torch.zeros_like(v['fp']['expr'][0, 0], requires_grad=True)) for v in views]
+            ex=torch.zeros_like(v['fp']['expr'][0, 0], requires_grad=True),
+            gain=torch.ones(3, device=dev, requires_grad=True), bias=torch.zeros(3, device=dev, requires_grad=True))
+       for v in views]
 opt = torch.optim.Adam([
-    dict(params=[d_xyz], lr=2e-4), dict(params=[col], lr=5e-3), dict(params=[op], lr=1e-2),
-    dict(params=[lsc], lr=2e-3), dict(params=[rot], lr=1e-3),
+    dict(params=[d_raw], lr=3e-2), dict(params=[col], lr=2e-3), dict(params=[op], lr=5e-3),
+    dict(params=[d_sc], lr=2e-3), dict(params=[rot], lr=5e-4),
     dict(params=[f['rot'] for f in fix] + [f['tr'] for f in fix], lr=1e-3),
-    dict(params=[f['ex'] for f in fix], lr=3e-3)])
+    dict(params=[f['ex'] for f in fix], lr=3e-3),
+    dict(params=[f['gain'] for f in fix[1:]] + [f['bias'] for f in fix[1:]], lr=3e-3)])
 
 
 def model_now():
+    d_xyz = MAX_MOVE * torch.tanh(d_raw)
     return GaussianModel(xyz=xyz0 + d_xyz, opacity=torch.sigmoid(op), rotation=F.normalize(rot, dim=-1),
-                         scaling=torch.exp(lsc), shs=col.clamp(0, 1), offset=gs0.offset)
+                         scaling=torch.exp(lsc0 + d_sc.clamp(-1.0, math.log(1.5))), shs=col.clamp(0, 1),
+                         offset=gs0.offset)
 
 
 def render(gs, v, f=None):
@@ -136,38 +148,62 @@ def render(gs, v, f=None):
 
 
 with torch.no_grad():
-    before = [render(gs0, v)[0].clamp(0, 1) for v in views]
+    before, regions = [], []
+    for v in views:
+        rgb_b, m_b = render(gs0, v)
+        before.append(rgb_b.clamp(0, 1))
+        # くらべる範囲：磨く前の頭が写っている所を少し広げたもの × 写真で人が写っている所
+        reg_ = F.max_pool2d((m_b.permute(2, 0, 1)[None] > 0.3).float(), 15, stride=1, padding=7)[0].permute(1, 2, 0)
+        regions.append(reg_ * (v['mask'] > 0.5).float())
+SNAPS = sorted({k for k in (100, 200, 400, ITERS) if k <= ITERS})
+snaps = {}
 
 print(f'■ {len(views)} 枚の写真に合うように磨いています（{ITERS} 回）')
 t0 = time.time()
 for it in range(ITERS):
     opt.zero_grad()
     loss = 0
+    gs_now = model_now()
     for i, (v, f) in enumerate(zip(views, fix)):
-        rgb, m = render(model_now(), v, f)
-        wv = 2.0 if i == 0 else 1.0                                   # 正面写真は少し重く
-        l_rgb = (rgb - v['rgb']).abs().mean()
-        l_m = (m - v['mask']).abs().mean()
+        rgb, m = render(gs_now, v, f)
+        if i > 0:                                                     # 写真ごとの明るさ・色合いの違いを吸収
+            rgb = rgb * f['gain'] + f['bias']
+        R_ = regions[i]
+        wv = 3.0 if i == 0 else 1.0                                   # 正面写真は重く（正面の見た目を崩さない）
+        l_rgb = ((rgb - v['rgb']).abs() * R_).sum() / (R_.sum() * 3 + 1)
         # 細かい模様（目・鼻すじ・口元）が合うように、少しぼかした画像同士でもくらべる
-        l_lo = (F.avg_pool2d(rgb.permute(2, 0, 1)[None], 4) - F.avg_pool2d(v['rgb'].permute(2, 0, 1)[None], 4)).abs().mean()
-        loss = loss + wv * (l_rgb + 0.5 * l_lo + 0.3 * l_m)
-    loss = loss / len(views)
+        Rp = F.avg_pool2d(R_.permute(2, 0, 1)[None], 4)
+        l_lo = ((F.avg_pool2d(rgb.permute(2, 0, 1)[None], 4) - F.avg_pool2d(v['rgb'].permute(2, 0, 1)[None], 4)).abs()
+                * Rp).sum() / (Rp.sum() * 3 + 1)
+        loss = loss + wv * (l_rgb + 0.5 * l_lo)
+    loss = loss / (len(views) + 2)
     # 写っていない所が崩れないように、出発点から離れすぎないようにする
-    reg = 50.0 * (d_xyz ** 2).sum(-1).mean() + 0.1 * ((col - col0) ** 2).mean() \
-        + 1e-3 * sum((f['ex'] ** 2).mean() + 10 * (f['rot'] ** 2).sum() + 10 * (f['tr'] ** 2).sum() for f in fix)
+    reg = 0.02 * ((col - col0) ** 2).mean() + 1e-3 * (d_raw ** 2).mean() \
+        + 1e-3 * sum((f['ex'] ** 2).mean() + 10 * (f['rot'] ** 2).sum() + 10 * (f['tr'] ** 2).sum()
+                     + ((f['gain'] - 1) ** 2).sum() + (f['bias'] ** 2).sum() for f in fix)
     (loss + reg).backward()
     opt.step()
     if it % 100 == 0 or it == ITERS - 1:
         print(f'  {it + 1} / {ITERS}：写真とのずれ {loss.item():.4f}（{time.time() - t0:.0f}秒）')
+    if it + 1 in SNAPS:                                               # 途中の結果を残す
+        with torch.no_grad():
+            g = model_now()
+            snaps[it + 1] = (GaussianModel(xyz=g.xyz.detach().clone(), opacity=g.opacity.detach().clone(),
+                                           rotation=g.rotation.detach().clone(), scaling=g.scaling.detach().clone(),
+                                           shs=g.shs.detach().clone(), offset=gs0.offset),
+                             [render(g, v, f)[0].clamp(0, 1) for v, f in zip(views, fix)])
 
-gs = model_now()
 with torch.no_grad():
-    after = [render(gs, v, f)[0].clamp(0, 1) for v, f in zip(views, fix)]
-    rows = [torch.cat([v['rgb'], b, a], 1) for v, b, a in zip(views, before, after)]
+    # 写真｜磨く前｜100回｜200回｜…（1行目が正面写真）
+    rows = [torch.cat([v['rgb'], before[i]] + [snaps[k][1][i] for k in SNAPS], 1) for i, v in enumerate(views)]
     grid = (torch.cat(rows, 0).cpu().numpy() * 255).astype(np.uint8)
     Image.fromarray(grid).save(os.path.join(OUT, f'{NAME}_compare.jpg'), quality=90)
-    final = GaussianModel(xyz=gs.xyz.detach(), opacity=gs.opacity.detach(), rotation=gs.rotation.detach(),
-                          scaling=gs.scaling.detach(), shs=gs.shs.detach(), offset=gs0.offset)
+    with open(os.path.join(OUT, f'{NAME}_compare.txt'), 'w') as fh:
+        fh.write('写真｜磨く前｜' + '｜'.join(f'{k}回' for k in SNAPS))
+    for k in SNAPS:
+        g = snaps[k][0]
+        g.save_ply(os.path.join(OUT, f'{NAME}_lam_refined_{k}.ply'), rgb2sh=False, offset2xyz=False)
+    final = snaps[SNAPS[-1]][0]
     final.save_ply(os.path.join(OUT, f'{NAME}_lam_refined.ply'), rgb2sh=False, offset2xyz=False)
     off = final.offset
     final.offset = final.xyz - (xyz0 - gs0.offset)                     # 顔の形からのずれ（LAMのブラウザ表示用）
