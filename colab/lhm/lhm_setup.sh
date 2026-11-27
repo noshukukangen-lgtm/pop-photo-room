@@ -16,6 +16,30 @@ if [ ! -d /content/LHMPP ]; then
   git clone -q --depth 1 https://github.com/aigc3d/LHM-plusplus.git /content/LHMPP
 fi
 
+# 点の集まりを読むAI（Sonata）は、専用の高速部品（flash-attn）がないと、メモリを大量に使う計算方法になって
+# L4（24GB）でもあふれる。PyTorch に入っている省メモリの計算方法を使うように書き換える（結果は同じ）
+python3 - <<'PYEOF'
+p = '/content/LHMPP/core/models/encoders/sonata/model.py'
+s = open(p).read()
+old = """            # attn
+            if self.upcast_attention:"""
+new = """            if self.rpe is None:
+                # 省メモリの計算（結果は下と同じ）
+                feat = torch.nn.functional.scaled_dot_product_attention(q, k, v, scale=self.scale)
+                feat = feat.to(qkv.dtype).transpose(1, 2).reshape(-1, C)
+                feat = feat[inverse]
+                feat = self.proj(feat)
+                feat = self.proj_drop(feat)
+                point.feat = feat
+                return point
+            # attn
+            if self.upcast_attention:"""
+if old in s and 'scaled_dot_product_attention' not in s:
+    s = s.replace(old, new, 1)
+    open(p, 'w').write(s)
+    print('点を読むAIを、省メモリの計算方法に切り替えました')
+PYEOF
+
 if [ ! -x /content/lhm_env/bin/python ]; then
   step 'Python 3.10 の環境を作成'
   pip -q install uv
