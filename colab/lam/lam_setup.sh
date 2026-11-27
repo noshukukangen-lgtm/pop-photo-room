@@ -61,8 +61,10 @@ fi
 
 if ! done_ ext; then
   step 'GPU向けの部品を入れる（PyTorch3D・ガウシアン描画・nvdiffrast。5〜15分）'
-  $PIP --no-index --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt230/download.html \
-    || $PIP --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.8"
+  # PyTorch3D：組み立て済みのものを使う（それが使えなければ、その場で組み立てる。10〜20分）
+  $PIP fvcore iopath
+  $PIP --no-index --no-deps --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt230/download.html \
+    || $PIP --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.7"
   $PIP --no-build-isolation git+https://github.com/ashawkey/diff-gaussian-rasterization/
   $PIP --no-build-isolation git+https://github.com/camenduru/simple-knn/
   $PIP --no-build-isolation "nvdiffrast@git+https://github.com/ShenhanQian/nvdiffrast@backface-culling"

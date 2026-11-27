@@ -50,7 +50,10 @@ fi
 
 if ! done_ ext; then
   step '組み立て済みの部品を入れる（PyTorch3D・torch_scatter・spconv・gsplat）'
-  $PIP --no-index --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt230/download.html
+  # PyTorch3D：組み立て済みのものを使う（それが使えなければ、その場で組み立てる。10〜20分）
+  $PIP fvcore iopath
+  $PIP --no-index --no-deps --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt230/download.html \
+    || $PIP --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.7"
   $PIP torch_scatter -f https://data.pyg.org/whl/torch-2.3.0+cu121.html
   $PIP spconv-cu121
   $PIP "gsplat==1.4.0+pt23cu121" --index-url https://docs.gsplat.studio/whl/pt23cu121 \
