@@ -80,6 +80,7 @@
   <div class="help">
     <b>PNGはすべてColabで作ったデータとして、AIを使わずに高精細の切り抜き・奥行きのまま読み込みます</b>（JPGなど普通の写真と混ぜて選んでもOK）<br>
     <b>動画</b>：Colabの loop_tool で作った「〜_loop.webm」は写真と同じように置けて、ずっとくり返し再生されます。VR180（〜_vr180_packed.mp4 など）は、名前が変わっていても動画の形で見分けます<br>
+    <b>動画ライブラリ</b>：読み込んだ動画は、部屋から消してもライブラリに残ります。VRの中で調整パネル（スティック押し込み）→「動画ライブラリ」から、VRを出ずに出す・しまう・ライブラリから消すができます<br>
     片手トリガー：つかんで移動 ／ 両手トリガー：広げて拡大縮小 ／ つかんでスティック上下：微調整<br>
     写真に手を近づけると、手から前に伸びる楕円の範囲だけ写真が透けます（調整パネルで太さ・長さを変更、太さ0で無効）<br>
     つかんで A・X：その写真の切り抜き切替 ／ B・Y：全部の切り抜き切替<br>
@@ -119,7 +120,7 @@ try {
   if (/^[\w.-]{1,40}$/.test(t)) V = t;
 } catch (e) {}
 document.getElementById('ver').textContent = '版 ' + V;
-for (const f of ['core', 'ai', 'photo', 'load', 'planes', 'xr', 'storage', 'face', 'follow', 'video', 'idle', 'splat']){
+for (const f of ['core', 'ai', 'photo', 'load', 'planes', 'xr', 'storage', 'face', 'follow', 'video', 'library', 'idle', 'splat']){
   await import(`./js/${f}.js?v=${V}`);
 }
 window.appStarted = true;
