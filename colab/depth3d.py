@@ -11,6 +11,7 @@ from PIL import Image
 import loop_tool as lt
 
 MAX_LONG = 1920          # 長い辺の上限（Questで滑らかに再生できる大きさ）
+LOOP_PIX = 1920 * 1080 * 24 * 15   # ループを全部メモリに載せるときの上限（フルHDで15秒ぶん）
 FPS_MAX = 30             # コマ数の上限
 _depth = None
 
@@ -235,12 +236,18 @@ def make_full_3d(path, t, log, box, half=None):
 
 
 def make_loop_3d(path, t, log, box):
-    """選んだ時間の近くで、きれいにループする2〜5秒を探して、全部のコマで立体にする"""
+    """選んだ時間の近くで、きれいにループする区間（つなぎ目がきれいな範囲でできるだけ長く、2〜30秒）を探して、全部のコマで立体にする"""
     dur = lt.duration(path)
     log(f'{lt.fmt(t)} の前後で、きれいにループする区間を探しています…')
     s, L, d = lt.find_loop(path, t, dur)
     log(f'{lt.fmt(s)} から {L:.1f} 秒を使います（つなぎ目の差 {d:.1f}、小さいほどなめらか）')
-    w, _ = _size(path, s)
+    w, h = _size(path, s)
+    # 長いループは全部のコマをメモリに載せるので、多すぎるときだけ少し小さくする（Colabのメモリがあふれないように）
+    px = L * lt.FPS * w * h
+    if px > LOOP_PIX:
+        k = (LOOP_PIX / px) ** 0.5
+        w = max(6, int(w * k) // 6 * 6)
+        log(f'長いループなので、{w} 幅に少し小さくして作ります')
     frames = lt.read_frames(path, s, L, w, lt.FPS)
     log(f'人物を切り抜いています…（{len(frames)} コマ）')
     a = lt.matte(frames)
