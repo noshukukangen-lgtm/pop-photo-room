@@ -10,7 +10,7 @@
 # ・動画は マイドライブ/kirinuki/input_videos に入れる（upload=True のときは不要）
 # ・ファイル名の最後に「@1分23秒」「@1時間2分3秒」「@1-23」のように書いておくと、その時間ですぐ作れる
 # ・書いていなければ、サムネイル（1分ごと → 前後1分を2秒ごと）で場面を選ぶ
-# ・ループ：選んだ時間をふくむ区間から、つなぎ目がきれいな範囲でできるだけ長い（2〜15秒）ループを自動で探す（カットはまたがない）
+# ・ループ：選んだ時間をふくむ区間から、つなぎ目がきれいな範囲でできるだけ長い（2〜30秒）ループを自動で探す（カットはまたがない）
 # ・長いまま：選んだ時間の前後1分ずつ（切り出しツールで作ったクリップなら全部）を、音声つきでそのまま切り抜く
 # ・VR180（左に左目・右に右目が並んだ動画）は、左右それぞれ人物を切り抜いて名前に「_vr180」を付ける
 #   VR180を長いままにすると、元の画質のまま「型紙つきの普通の動画（〜_vr180_packed.mp4）」にする
@@ -27,7 +27,7 @@ OUT_DIR = f'{BASE}/output_loops'
 LONG_SIDE = 1280        # 出力の長辺（Questで軽く再生できる大きさ）
 VR_LONG = 2880          # VR180の出力の横幅（左右合わせて。片目1440）
 FPS = 24                # 出力のコマ数
-MIN_LEN, MAX_LEN = 2.0, 15.0  # ループの長さ（秒）。つなぎ目がきれいな範囲で、できるだけ長くする
+MIN_LEN, MAX_LEN = 2.0, 30.0  # ループの長さ（秒）。つなぎ目がきれいな範囲で、できるだけ長くする
 LOOP_SLACK = 0.15       # 一番きれいなつなぎ目より、どれだけ差が大きくても「きれい」とみなすか（15%）
 FADE = 8                # 終わりを最初に溶け込ませるコマ数
 FULL_HALF = 60.0        # 長いまま：選んだ時間の前後、何秒ずつ使うか
@@ -191,17 +191,18 @@ def matte(frames):
 
 
 def loop_blend(rgb, a, k=FADE):
-    """終わりの数コマを、最初のコマにじわっと溶け込ませる"""
-    rgb = rgb.astype(np.float32)
-    a = a.astype(np.float32)
+    """終わりの数コマを、最初のコマにじわっと溶け込ませる（長いループでもメモリを食わないよう、終わりのコマだけ計算する）"""
+    rgb = np.array(rgb, np.uint8, copy=True)
+    a = np.array(a, np.uint8, copy=True)
     n = len(rgb)
     k = min(k, n // 3)
+    r0, a0 = rgb[0].astype(np.float32), a[0].astype(np.float32)
     for q in range(k):
         wgt = (q + 1) / (k + 1)
         i = n - k + q
-        rgb[i] = rgb[i] * (1 - wgt) + rgb[0] * wgt
-        a[i] = a[i] * (1 - wgt) + a[0] * wgt
-    return rgb.clip(0, 255).astype(np.uint8), a.clip(0, 255).astype(np.uint8)
+        rgb[i] = (rgb[i].astype(np.float32) * (1 - wgt) + r0 * wgt).clip(0, 255).astype(np.uint8)
+        a[i] = (a[i].astype(np.float32) * (1 - wgt) + a0 * wgt).clip(0, 255).astype(np.uint8)
+    return rgb, a
 
 
 def encode(rgb, a, out):
