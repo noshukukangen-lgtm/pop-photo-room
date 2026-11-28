@@ -225,19 +225,34 @@ def _out_size(path, s, vr):
 
 
 def _download(out, log, box):
+    """できた動画をパソコンにダウンロードする。
+    Colabの files.download は「ダウンロードの命令」を表示欄に書き込む。この表示欄は文字を書き足すたびに中身を全部描き直すので、
+    命令が残っていると、描き直すたびに同じファイルが何度もダウンロードされてしまう。
+    そこで命令を表示欄に書かずに取り出して、ブラウザで1回だけ実行する"""
     if not UPLOAD:
         return
     log('ダウンロードを始めます（始まらなければ、左のフォルダの loop_out から右クリックでダウンロード）')
     try:
-        import time
-        from google.colab import files
-        n0 = len(box.outputs)
-        with box:
+        import IPython
+        from google.colab import files, output
+        js = []
+        orig = IPython.display.display
+
+        def catch(*objs, **kw):
+            rest = [o for o in objs if not isinstance(o, IPython.display.Javascript)]
+            js.extend(o.data for o in objs if isinstance(o, IPython.display.Javascript))
+            if rest:
+                orig(*rest, **kw)
+        IPython.display.display = catch
+        try:
             files.download(out)
-        # 表示欄は、文字を書き足すたびに中身を全部描き直す。ダウンロードの命令が残っていると、
-        # 描き直すたびに同じファイルがもう一度ダウンロードされてしまうので、始まったら命令だけ消す
-        time.sleep(3)
-        box.outputs = tuple(box.outputs[:n0]) + tuple(o for o in box.outputs[n0:] if o.get('output_type') == 'stream')
+        finally:
+            IPython.display.display = orig
+        if js:
+            output.eval_js('\n'.join(js), ignore_result=True)
+        else:                               # 取り出せなかったとき（Colabの仕組みが変わったとき）は前のやり方で
+            with box:
+                files.download(out)
     except Exception as e:
         log(f'自動ダウンロードできませんでした：左のフォルダの loop_out から右クリックでダウンロードしてください（{e}）')
 
