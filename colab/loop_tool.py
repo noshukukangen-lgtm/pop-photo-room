@@ -14,7 +14,7 @@
 # ・長いまま：選んだ時間の前後1分ずつ（切り出しツールで作ったクリップなら全部）を、音声つきでそのまま切り抜く
 # ・VR180（左に左目・右に右目が並んだ動画）は、左右それぞれ人物を切り抜いて名前に「_vr180」を付ける
 #   VR180を長いままにすると、元の画質のまま「型紙つきの普通の動画（〜_vr180_packed.mp4）」にする
-import os, re, json, subprocess, shutil, tempfile, base64, io
+import os, re, json, subprocess, shutil, tempfile, base64, io, unicodedata
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import ipywidgets as W
@@ -87,12 +87,13 @@ def fmt(t):
 
 def time_from_name(name):
     """ファイル名の最後の「@1分23秒」「@1時間2分3秒」「@83秒」「@1-23」「@1-02-03」を秒にする"""
-    n = os.path.splitext(name)[0]
-    m = re.search(r'@(?:(\d+)時間)?(?:(\d+)分)?(?:(\d+(?:\.\d+)?)秒)?$', n)
+    # 全角の「＠」「１」や、拡張子の前の空白があっても読めるようにそろえる
+    n = unicodedata.normalize('NFKC', os.path.splitext(name)[0]).strip()
+    m = re.search(r'@\s*(?:(\d+)\s*時間)?\s*(?:(\d+)\s*分)?\s*(?:(\d+(?:\.\d+)?)\s*秒)?$', n)
     if m and any(m.groups()):
         h, mi, s = (float(x) if x else 0.0 for x in m.groups())
         return h * 3600 + mi * 60 + s
-    m = re.search(r'@(\d+)[:\-_](\d{1,2})(?:[:\-_](\d{1,2}))?$', n)
+    m = re.search(r'@\s*(\d+)[:\-_](\d{1,2})(?:[:\-_](\d{1,2}))?$', n)
     if m:
         a, b, c = m.groups()
         return int(a) * 3600 + int(b) * 60 + int(c) if c else int(a) * 60 + int(b)
