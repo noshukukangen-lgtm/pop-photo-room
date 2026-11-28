@@ -67,11 +67,52 @@ def duration(path):
     return float(json.loads(r.stdout)['format']['duration'])
 
 
-def thumb(path, t, w=200):
+def thumb(path, t, w=200, raw=False):
     r = subprocess.run(['ffmpeg', '-v', 'error', '-ss', f'{t:.2f}', '-i', path, '-frames:v', '1',
-                        '-vf', f'scale={w}:-2', '-f', 'image2', '-c:v', 'mjpeg', '-q:v', '5', 'pipe:1'],
+                        '-vf', ('' if raw else crop_vf(path)) + f'scale={w}:-2', '-f', 'image2', '-c:v', 'mjpeg', '-q:v', '5', 'pipe:1'],
                        capture_output=True)
     return r.stdout
+
+
+_crops = {}
+def crop_vf(path):
+    """動画のまわりの黒い帯（縦動画を横長で保存したときの左右の黒など）を見つけて、切り落とす ffmpeg の指定を返す。
+    なければ ''。VR180（横が縦の約2倍）は左右の目の並びが崩れるので切らない"""
+    if path in _crops:
+        return _crops[path]
+    vf = ''
+    try:
+        W, H = Image.open(io.BytesIO(thumb(path, 1, 'iw', raw=True))).size     # 回転を直したあとの元の大きさ
+        if W < 1.9 * H:
+            dur = duration(path)
+            boxes = []
+            for t in (dur * 0.15, dur * 0.5, dur * 0.85):            # 暗い場面だけで判断しないよう、3か所で調べる
+                r = subprocess.run(['ffmpeg', '-v', 'info', '-ss', f'{t:.2f}', '-i', path, '-t', '2',
+                                    '-vf', 'cropdetect=limit=24:round=2:reset=0', '-an', '-f', 'null', '-'],
+                                   capture_output=True, text=True)
+                m = re.findall(r'crop=(\d+):(\d+):(\d+):(\d+)', r.stderr)
+                if m:
+                    boxes.append(tuple(map(int, m[-1])))
+            if boxes:
+                x0 = min(b[2] for b in boxes); y0 = min(b[3] for b in boxes)
+                x1 = max(b[2] + b[0] for b in boxes); y1 = max(b[3] + b[1] for b in boxes)
+                # 帯は左右（上下）同じ太さのはず。片側だけ黒いのは暗い場面なので切らない
+                if not (W * 0.04 < x0 and abs(x0 - (W - x1)) < W * 0.03):
+                    x0, x1 = 0, W
+                if not (H * 0.04 < y0 and abs(y0 - (H - y1)) < H * 0.03):
+                    y0, y1 = 0, H
+                cw, ch = (x1 - x0) // 2 * 2, (y1 - y0) // 2 * 2
+                if cw < W or ch < H:
+                    vf = f'crop={cw}:{ch}:{x0}:{y0},'
+    except Exception:
+        vf = ''
+    _crops[path] = vf
+    return vf
+
+
+def src_size(path, t=1):
+    """黒い帯を切り落としたあとの、元の大きさ"""
+    return Image.open(io.BytesIO(thumb(path, t, 'iw'))).size
 
 
 def thumbs(path, times):
@@ -108,7 +149,7 @@ def frame_size(path, t, w):
 def read_frames(path, start, length, w, fps):
     w, h = frame_size(path, start, w)
     r = subprocess.run(['ffmpeg', '-v', 'error', '-ss', f'{start:.3f}', '-t', f'{length:.3f}', '-i', path,
-                        '-vf', f'scale={w}:{h},fps={fps}', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
+                        '-vf', crop_vf(path) + f'scale={w}:{h},fps={fps}', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
                        capture_output=True)
     n = len(r.stdout) // (w * h * 3)
     return np.frombuffer(r.stdout[:n * w * h * 3], np.uint8).reshape(n, h, w, 3)
@@ -307,7 +348,7 @@ def make_full(path, t, log, box, vr=False):
     log(f'{fmt(s)} から {L:.0f} 秒を、長いまま切り抜きます（{total} コマ{" × 左右2" if vr else ""}。10分以上かかることがあります）')
 
     dec = subprocess.Popen(['ffmpeg', '-v', 'error', '-ss', f'{s:.3f}', '-t', f'{L:.3f}', '-i', path,
-                            '-vf', f'scale={w}:{h},fps={FPS}', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
+                            '-vf', ('' if vr else crop_vf(path)) + f'scale={w}:{h},fps={FPS}', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
                            stdout=subprocess.PIPE)
     enc = subprocess.Popen(['ffmpeg', '-v', 'error', '-y',
                             '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', f'{w}x{h}', '-framerate', str(FPS), '-i', 'pipe:0',
