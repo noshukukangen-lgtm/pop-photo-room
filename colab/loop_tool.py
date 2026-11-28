@@ -198,11 +198,17 @@ def _out_size(path, s, vr):
 def _download(out, log, box):
     if not UPLOAD:
         return
+    log('ダウンロードを始めます（始まらなければ、左のフォルダの loop_out から右クリックでダウンロード）')
     try:
+        import time
         from google.colab import files
+        n0 = len(box.outputs)
         with box:
             files.download(out)
-        log('ダウンロードを始めました（始まらなければ、左のフォルダの loop_out から右クリックでダウンロード）')
+        # 表示欄は、文字を書き足すたびに中身を全部描き直す。ダウンロードの命令が残っていると、
+        # 描き直すたびに同じファイルがもう一度ダウンロードされてしまうので、始まったら命令だけ消す
+        time.sleep(3)
+        box.outputs = tuple(box.outputs[:n0]) + tuple(o for o in box.outputs[n0:] if o.get('output_type') == 'stream')
     except Exception as e:
         log(f'自動ダウンロードできませんでした：左のフォルダの loop_out から右クリックでダウンロードしてください（{e}）')
 
