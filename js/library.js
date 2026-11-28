@@ -245,3 +245,52 @@ ovBack.onclick = () => {
 ovCancel.onclick = hideOv;
 // VRに戻ったら、覚えていた正面は使い終わり
 renderer.xr.addEventListener('sessionstart', () => { if (ov.style.display !== 'flex'){ A.vrReturnPose = null; ovLoading = false; } });
+
+// =====================================================================
+// 動画の一時停止：つかまずに動画を指して A（右手）・X（左手）で、止める／また動かす
+//   （つかんでいるときの A・X は、今まで通り切り抜きの切り替え）
+// =====================================================================
+const pRay = new THREE.Raycaster(), pRot = new THREE.Matrix4(), pPrev = [false, false];
+function togglePause(m){
+  const v = m.userData.video;
+  if (!v) return false;
+  if (v.paused){ m.userData.userPaused = false; v.play().catch(() => {}); }
+  else { m.userData.userPaused = true; v.pause(); }
+  return true;
+}
+// 動画も写真と同じく、離れても・斜めから見てもくっきり見えるようにする
+//   （縮小版を毎コマ作って、なめらかに縮める＋斜めでもぼやけにくくする。Questの負担は少し増える）
+function sharpen(m){
+  const t = m.material.uniforms.map.value;
+  if (!t || !t.isVideoTexture || t.userData.sharp) return;
+  t.generateMipmaps = true;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.anisotropy = A.ANISO || 1;
+  t.userData.sharp = true;
+  t.needsUpdate = true;
+}
+const prevRender = renderer.render.bind(renderer);
+renderer.render = (s, cam) => {
+  for (const m of A.photos) if (m.userData.video) sharpen(m);
+  if (renderer.xr.isPresenting){
+    [0, 1].forEach(i => {
+      const c = renderer.xr.getController(i), gp = c.userData.gamepad;
+      const now = !!(gp && gp.buttons[4] && gp.buttons[4].pressed);
+      const edge = now && !pPrev[i];
+      pPrev[i] = now;
+      if (!edge || c.userData.held) return;
+      pRot.extractRotation(c.matrixWorld);
+      pRay.ray.origin.setFromMatrixPosition(c.matrixWorld);
+      pRay.ray.direction.set(0, 0, -1).applyMatrix4(pRot);
+      const hit = pRay.intersectObjects(A.photos, false)[0];
+      if (hit && togglePause(hit.object)){
+        try { const h = gp.hapticActuators; h && h[0] && h[0].pulse(0.4, 40); } catch (e) {}
+      }
+    });
+  }
+  prevRender(s, cam);
+};
+// VRに入り直したとき、ほかの動画は再生し直すが、自分で止めた動画は止めたままにする
+renderer.xr.addEventListener('sessionstart', () => {
+  for (const m of A.photos) if (m.userData.userPaused && m.userData.video) m.userData.video.pause();
+});
