@@ -106,7 +106,7 @@ def _encoder_args(log):
 
 def _size(path, t):
     """長い辺を MAX_LONG までにした大きさ（縦横の回転も考える）。型紙の都合で 横は6・縦は4 の倍数"""
-    W0, H0, _ = lt._probe(path)
+    W0, H0 = lt.src_size(path, t)            # 黒い帯を切り落としたあとの大きさ（縦動画もそのまま縦）
     w64, h64 = lt.frame_size(path, t, 64)
     long = min(max(W0, H0), MAX_LONG)
     w = long if w64 >= h64 else int(round(long * w64 / h64))
@@ -190,7 +190,7 @@ def make_full_3d(path, t, log, box, half=None):
     log(f'{lt.fmt(s)} から {L:.0f} 秒を、{w}×{h}・{fps:.0f}コマで、全部のコマを立体にします（{int(L * fps)} コマ。10分以上かかることがあります）')
 
     dec = subprocess.Popen(['ffmpeg', '-v', 'error', '-ss', f'{s:.3f}', '-t', f'{L:.3f}', '-i', path,
-                            '-vf', f'scale={w}:{h}:flags=lanczos,fps={fps}', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
+                            '-vf', lt.crop_vf(path) + f'scale={w}:{h}:flags=lanczos,fps={fps}', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
                            stdout=subprocess.PIPE)
     enc = subprocess.Popen(['ffmpeg', '-v', 'error', '-y',
                             '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{w}x{h + h // 2}', '-framerate', f'{fps}', '-i', 'pipe:0',
