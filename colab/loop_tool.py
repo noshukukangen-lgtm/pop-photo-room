@@ -10,7 +10,7 @@
 # ・動画は マイドライブ/kirinuki/input_videos に入れる（upload=True のときは不要）
 # ・ファイル名の最後に「@1分23秒」「@1時間2分3秒」「@1-23」のように書いておくと、その時間ですぐ作れる
 # ・書いていなければ、サムネイル（1分ごと → 前後1分を2秒ごと）で場面を選ぶ
-# ・ループ：選んだ時間の前後から、最初と最後がいちばん似ている2〜5秒を自動で探して切り出す
+# ・ループ：選んだ時間をふくむ区間から、つなぎ目がきれいな範囲でできるだけ長い（2〜15秒）ループを自動で探す（カットはまたがない）
 # ・長いまま：選んだ時間の前後1分ずつ（切り出しツールで作ったクリップなら全部）を、音声つきでそのまま切り抜く
 # ・VR180（左に左目・右に右目が並んだ動画）は、左右それぞれ人物を切り抜いて名前に「_vr180」を付ける
 #   VR180を長いままにすると、元の画質のまま「型紙つきの普通の動画（〜_vr180_packed.mp4）」にする
@@ -27,8 +27,8 @@ OUT_DIR = f'{BASE}/output_loops'
 LONG_SIDE = 1280        # 出力の長辺（Questで軽く再生できる大きさ）
 VR_LONG = 2880          # VR180の出力の横幅（左右合わせて。片目1440）
 FPS = 24                # 出力のコマ数
-MIN_LEN, MAX_LEN = 2.0, 5.0   # ループの長さ（秒）
-SEARCH = 4.0            # 選んだ時間の前後、何秒の中から探すか
+MIN_LEN, MAX_LEN = 2.0, 15.0  # ループの長さ（秒）。つなぎ目がきれいな範囲で、できるだけ長くする
+LOOP_SLACK = 0.15       # 一番きれいなつなぎ目より、どれだけ差が大きくても「きれい」とみなすか（15%）
 FADE = 8                # 終わりを最初に溶け込ませるコマ数
 FULL_HALF = 60.0        # 長いまま：選んだ時間の前後、何秒ずつ使うか
 VIDEO_EXT = ('.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi')
@@ -114,26 +114,54 @@ def read_frames(path, start, length, w, fps):
     return np.frombuffer(r.stdout[:n * w * h * 3], np.uint8).reshape(n, h, w, 3)
 
 
+def _seam_diff(x, ys, blk=8):
+    """つなぎ目の差。画面を小さな区画に分けて、いちばん差が大きい区画で測る
+       （画面全体の平均だと、人が少し動いた・ずれたくらいの差が背景に埋もれてしまうため）"""
+    h, w = (x.shape[0] // blk) * blk, (x.shape[1] // blk) * blk
+    dd = np.abs(ys[:, :h, :w] - x[None, :h, :w])
+    dd = dd.reshape(len(ys), h // blk, blk, w // blk, blk).mean((2, 4)).reshape(len(ys), -1)
+    return dd.max(axis=1)
+
+
 def find_loop(path, t, dur):
-    """選んだ時間 t の近くで、最初と最後のコマがいちばん似ている区間を探す"""
-    f = 12
-    s = max(0.0, t - SEARCH - MAX_LEN / 2)
-    e = min(dur, t + SEARCH + MAX_LEN / 2)
-    fr = read_frames(path, s, e - s, 160, f).astype(np.float32).mean(-1)
+    """選んだ時間 t をふくむ区間の中から、つなぎ目がきれいで、できるだけ長いループを探す
+       ・場面が切り替わるところ（カット）はまたがない
+       ・つなぎ目は「最初と最後のコマが似ている」だけでなく、その前後のコマも比べて、動きの流れも合わせる
+       ・一番きれいなつなぎ目と同じくらいきれいなものの中で、いちばん長いものを選ぶ"""
+    f = 8
+    s = max(0.0, t - MAX_LEN)
+    e = min(dur, t + MAX_LEN)
+    fr = read_frames(path, s, e - s, 96, f).astype(np.float32).mean(-1)
     n = len(fr)
     lo, hi = int(MIN_LEN * f), int(MAX_LEN * f)
-    if n <= lo:
+    if n <= lo + 2:
         return s, max(0.5, n / f), 0.0
-    best = None
-    for i in range(n):
-        for j in range(i + lo, min(n, i + hi + 1)):
-            d = float(np.abs(fr[i] - fr[j]).mean())
-            mid = s + (i + j) / 2 / f
-            cost = d + 0.5 * abs(mid - t)      # 似ているほど・選んだ時間に近いほど良い
-            if best is None or cost < best[0]:
-                best = (cost, i, j, d)
-    _, i, j, d = best
-    return s + i / f, (j - i) / f, d
+    # 場面の切り替わり：となりのコマとの差が、ふだんより飛び抜けて大きいところ
+    step = np.abs(fr[1:] - fr[:-1]).mean((1, 2))
+    cut = step > max(25.0, 4.0 * float(np.median(step)))
+    scene = np.concatenate([[0], np.cumsum(cut)])          # コマごとの「何番目の場面か」
+    ti = int(round((t - s) * f))
+    cands = []
+    for a in range(1, n - lo - 1):
+        if a > ti:
+            break
+        b_max = min(n - 2, a + hi)
+        if b_max < a + lo:
+            continue
+        bs = np.arange(a + lo, b_max + 1)
+        bs = bs[(bs >= ti) & (scene[bs] == scene[a])]       # 選んだ場面をふくみ、カットをまたがない
+        if not len(bs):
+            continue
+        # つなぎ目の差：最初と最後、その1コマ前どうし・1コマ後どうしも比べる（動きの向きも合わせる）
+        d = (_seam_diff(fr[a], fr[bs]) + _seam_diff(fr[a - 1], fr[bs - 1]) + _seam_diff(fr[a + 1], fr[bs + 1])) / 3
+        for b, dv in zip(bs, d):
+            cands.append((float(dv), a, int(b)))
+    if not cands:
+        return max(0.0, t - MIN_LEN / 2), MIN_LEN, 0.0
+    dmin = min(c[0] for c in cands)
+    ok = [c for c in cands if c[0] <= dmin * (1 + LOOP_SLACK) + 0.5]
+    dv, a, b = max(ok, key=lambda c: (c[2] - c[1], -c[0]))
+    return s + a / f, (b - a) / f, dv
 
 
 _rvm = None
