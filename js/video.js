@@ -8,6 +8,7 @@
 //     透明な動画より軽いので、元の画質のまま流せる
 //   ・「〜_3d.mp4」（ループ動画・AI動画）は、上 2/3 が映像、下 1/3 の左 2/3 が切り抜き、右 1/3 の上が奥行き・下がふくらみ。
 //     再生中のコマの奥行きで毎コマ形を作り直すので、全部のコマで立体になる
+//   ・読み込んだ動画は「動画ライブラリ」に残る。VRの中のパネルから、出す・しまう・ライブラリから消すができる（library.js）
 import * as THREE from 'three';
 
 const A = window.APP;
@@ -31,6 +32,13 @@ const tx = async (mode, fn) => {
 };
 const vPut = rec => tx('readwrite', s => s.put(rec));
 const vGet = id => tx('readonly', s => s.get(id));
+const vDel = id => tx('readwrite', s => s.delete(id));
+const vAll = () => tx('readonly', s => s.getAll());
+
+// 部屋に置いた写真（の id）が、ライブラリのどの動画かの対応表
+const MAP_KEY = 'popPhotoVidMap';
+const readMap = () => { try { return JSON.parse(localStorage.getItem(MAP_KEY) || '{}'); } catch (e) { return {}; } };
+const writeMap = mp => { try { localStorage.setItem(MAP_KEY, JSON.stringify(mp)); } catch (e) {} };
 
 // ---------- 動画要素を作る ----------
 function makeVideo(blob){
@@ -126,7 +134,7 @@ async function firstFrame(v){
 }
 
 // ---------- 全部のコマで立体になる動画（〜_3d.mp4）を読み込む ----------
-async function load3DVideo(file, label, v){
+async function load3DVideo(file, label, v, libId){
   await firstFrame(v);
   const W = v.videoWidth, Ht = v.videoHeight;
   const H = Math.round(Ht * 2 / 3), bh = Ht - H, mw = Math.round(W * 2 / 3), dw = W - mw, qh = Math.floor(bh / 2);
@@ -146,11 +154,11 @@ async function load3DVideo(file, label, v){
   const G = A.canvasToGrid(depthCanvas, gw, gh);
   const M = A.canvasToGrid(maskCanvas, gw, gh);
   A.note(`${label}：全部のコマで立体になる動画です（${W}×${H}）`);
-  A.buildPhotoMesh({ src: frame, width: W, height: H, G, M, gw, gh, maskCanvas, videoFile: file, videoEl: v, dv: true });
+  A.buildPhotoMesh({ src: frame, width: W, height: H, G, M, gw, gh, maskCanvas, videoFile: file, videoEl: v, dv: true, libId });
 }
 
 // ---------- 新しく読み込んだ動画から、立体の写真を作る ----------
-async function loadLoopVideo(file, label, opened){
+async function loadLoopVideo(file, label, opened, libId){
   status.textContent = `${label}：動画を開いています…`;
   const v = opened || await makeVideo(file);
   await firstFrame(v);
@@ -186,29 +194,150 @@ async function loadLoopVideo(file, label, opened){
   const G = A.canvasToGrid(depthRaw.toCanvas(), gw, gh);
   const M = A.canvasToGrid(maskCanvas, gw, gh);
 
-  A.buildPhotoMesh({ src: frame, width: w, height: h, G, M, gw, gh, maskCanvas, videoFile: file, videoEl: v });
+  A.buildPhotoMesh({ src: frame, width: w, height: h, G, M, gw, gh, maskCanvas, videoFile: file, videoEl: v, libId });
 }
 
-// buildPhotoMesh を包んで、動画なら見た目を差し替え＆保存。復元した写真に動画があれば差し替え
+// buildPhotoMesh を包んで、動画なら見た目を差し替え＆ライブラリと結びつける。復元した写真に動画があれば差し替え
+//   VRの中でライブラリから出したときは、全体を並べ直さずに、自分の正面に1つだけ置く
+let placeNext = false, skipArrange = false;
+const origArrange = A.arrangeAround;
+A.arrangeAround = (...args) => { if (!skipArrange) origArrange(...args); };
+const cPos = new THREE.Vector3(), cDir = new THREE.Vector3();
+function placeInFront(m){
+  const L = m.userData.layout, inXR = renderer.xr.isPresenting;
+  A.camera.getWorldPosition(cPos);
+  A.camera.getWorldDirection(cDir);
+  const eyeY = inXR ? cPos.y : 1.5;
+  if (!inXR){ cPos.set(0, 0, 0); cDir.set(0, 0, -1); }
+  cDir.y = 0;
+  if (cDir.lengthSq() < 1e-4) cDir.set(0, 0, -1);
+  cDir.normalize();
+  m.scale.setScalar(L.s);
+  const y = (inXR && L.fullBody && A.floorY !== null) ? A.floorY - L.s * L.bottom : eyeY + 0.15 - L.s * L.top;
+  m.position.set(cPos.x + cDir.x * 1.2, y, cPos.z + cDir.z * 1.2);
+  m.lookAt(cPos.x, y, cPos.z);
+  m.translateX(-L.s * L.cx);
+  m.updateMatrixWorld(true);
+}
+
 const origBuild = A.buildPhotoMesh;
 A.buildPhotoMesh = d => {
-  origBuild(d);
+  const front = placeNext;
+  placeNext = false;
+  skipArrange = front;
+  try { origBuild(d); } finally { skipArrange = false; }
   const m = photos[photos.length - 1];
   if (!m) return;
+  if (front){
+    A.autoArranged = false;
+    placeInFront(m);
+    // 顔に合わせた大きさが少しあとで決まるので、まだ動かしていなければ置き直す
+    const p0 = m.position.clone();
+    setTimeout(() => { if (photos.includes(m) && m.parent === A.scene && m.position.distanceTo(p0) < 1e-4) placeInFront(m); }, 1500);
+  }
   if (d.videoEl){
     if (d.dv) use3D(m, d.videoEl); else useVideo(m, d.videoEl);
-    const save = () => {
-      if (!m.userData.id) return setTimeout(save, 200);
-      vPut({ id: m.userData.id, video: d.videoFile, dv: !!d.dv }).catch(e => showErr('動画を保存できませんでした：' + (e.message || e)));
+    m.userData.libId = d.libId;
+    const link = () => {
+      if (!m.userData.id) return setTimeout(link, 200);
+      const mp = readMap(); mp[m.userData.id] = d.libId; writeMap(mp);
     };
-    save();
+    if (d.libId) link();
   } else if (d.saved){
-    vGet(d.saved.id).then(async rec => {
+    const libId = readMap()[d.saved.id] || d.saved.id;
+    vGet(libId).then(async rec => {
       if (!rec || !photos.includes(m)) return;
       const v = await makeVideo(rec.video);
+      m.userData.libId = libId;
       if (rec.dv) use3D(m, v); else useVideo(m, v);
     }).catch(() => {});
   }
+};
+
+// ---------- 動画ライブラリ ----------
+// 小さな見本の絵（ライブラリのパネルに出す）。sw×sh の範囲を切り取る
+async function makeThumb(v, sw, sh){
+  const k = Math.min(1, 240 / Math.max(sw, sh));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(sw * k)); c.height = Math.max(1, Math.round(sh * k));
+  c.getContext('2d').drawImage(v, 0, 0, sw, sh, 0, 0, c.width, c.height);
+  return new Promise(r => c.toBlob(r, 'image/png'));
+}
+const thumbRect = (v, kind, packed) => {
+  const W = v.videoWidth, H = v.videoHeight;
+  if (kind === 'dv') return [W, Math.round(H * 2 / 3)];
+  if (kind === 'vr180') return [Math.round(W / 2), packed ? Math.round(H * 2 / 3) : H];
+  return [W, H];
+};
+async function addToLib(file, v, kind, packed){
+  const id = 'v' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  let thumb = null;
+  try { await firstFrame(v); thumb = await makeThumb(v, ...thumbRect(v, kind, packed)); } catch (e) {}
+  // 大きな動画は保存に時間がかかるので、待たずに進める
+  vPut({ id, video: file, dv: kind === 'dv', kind, packed: !!packed, name: file.name || '', thumb, time: Date.now() })
+    .then(() => A.libraryChanged && A.libraryChanged())
+    .catch(e => showErr('動画をライブラリに保存できませんでした：' + (e.message || e)));
+  return id;
+}
+const kindOf = r => r.kind || (r.dv ? 'dv' : 'loop');
+
+A.videoLib = {
+  // ライブラリの一覧（古い順）。動画そのものは読み込まない
+  async list(){
+    const recs = await vAll();
+    return recs.map(r => ({ id: r.id, name: r.name || '', kind: kindOf(r), thumb: r.thumb || null, time: r.time || 0 }))
+               .sort((a, b) => a.time - b.time);
+  },
+  // 今、部屋に出ている動画の id
+  placed(){
+    const s = new Set(photos.map(m => m.userData.libId).filter(Boolean));
+    if (vr && vr.libId) s.add(vr.libId);
+    return s;
+  },
+  // 前の版で保存した動画には見本の絵がないので、あとから作る
+  async makeThumbFor(id){
+    const rec = await vGet(id);
+    if (!rec || rec.thumb) return rec && rec.thumb;
+    const v = await makeVideo(rec.video);
+    try {
+      await firstFrame(v);
+      rec.thumb = await makeThumb(v, ...thumbRect(v, kindOf(rec), rec.packed));
+      await vPut(rec);
+    } finally { v.pause(); URL.revokeObjectURL(v.src); v.removeAttribute('src'); v.load(); }
+    return rec.thumb;
+  },
+  // 部屋に出す（VRの中なら自分の正面に）
+  async place(id){
+    const rec = await vGet(id);
+    if (!rec) throw new Error('ライブラリに見つかりません');
+    const v = await makeVideo(rec.video);
+    const kind = kindOf(rec), label = rec.name || '動画';
+    if (kind === 'vr180'){ await loadVR180(rec.video, v, rec.name, id); return; }
+    placeNext = true;
+    try {
+      if (kind === 'dv') await load3DVideo(rec.video, label, v, id);
+      else await loadLoopVideo(rec.video, label, v, id);
+    } finally { placeNext = false; }
+  },
+  // 部屋からしまう（ライブラリには残る）
+  unplace(id){
+    if (vr && vr.libId === id) clearVR180();
+    const mp = readMap();
+    for (const m of [...photos]) if (m.userData.libId === id){
+      if (m.userData.id) delete mp[m.userData.id];
+      A.disposePhoto(m);
+    }
+    writeMap(mp);
+    A.drawPanel();
+  },
+  // ライブラリからも消す
+  async remove(id){
+    this.unplace(id);
+    const mp = readMap();
+    for (const k of Object.keys(mp)) if (mp[k] === id) delete mp[k];
+    writeMap(mp);
+    await vDel(id);
+  },
 };
 
 // =====================================================================
@@ -263,12 +392,13 @@ void main(){
   #include <colorspace_fragment>
 }`;
 
-async function loadVR180(file, opened){
+async function loadVR180(file, opened, name, libId){
   status.textContent = 'VR180の動画を開いています…（30秒ほどかかることがあります）';
   const v = opened || await makeVideo(file);
   clearVR180();
   // 型紙つきかどうか：名前に「packed」があるか、縦横比が 3:4 に近い（ふつうのVR180は 1:2）
-  const packed = /packed/i.test(file.name) || v.videoHeight > v.videoWidth * 0.62;
+  const packed = /packed/i.test(name || file.name || '') || v.videoHeight > v.videoWidth * 0.62;
+  if (!libId) libId = await addToLib(file, v, 'vr180', packed);
   const tex = new THREE.VideoTexture(v);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.minFilter = THREE.LinearFilter;
@@ -296,7 +426,7 @@ async function loadVR180(file, opened){
     group.add(mesh);
   });
   A.scene.add(group);
-  vr = { group, v, tex, needYaw: true };
+  vr = { group, v, tex, needYaw: true, libId };
   // VRに入る前は音なしで。VRに入ったら最初から音つきで流す
   v.play().catch(() => {});
   if (renderer.xr.isPresenting){ v.currentTime = 0; playWithSound(v); }
@@ -331,7 +461,7 @@ function watchSmoothness(v){
 const origRender = renderer.render.bind(renderer);
 renderer.render = (scene, cam) => {
   // 消した写真の動画の音が鳴り続けないように止める
-  for (const m of soundMeshes) if (!photos.includes(m)){ m.userData.video.pause(); soundMeshes.delete(m); }
+  for (const m of soundMeshes) if (!photos.includes(m)){ m.userData.video && m.userData.video.pause(); soundMeshes.delete(m); }
   for (const m of photos){
     if (!m.userData.dv) continue;
     for (const mat of [m.material, m.userData.back.material]){
@@ -399,12 +529,15 @@ $('videos').addEventListener('change', async e => {
       const v = await makeVideo(f);
       A.note(`${label}：開けました ${v.videoWidth}×${v.videoHeight}`);
       if (looksVR180(f, v, webm)){ vrCount++; await loadVR180(f, v); }
-      else if (!webm){
+      else {
         // WebMでないループ動画は、全部のコマで立体になる動画（〜_3d.mp4）
-        await load3DVideo(f, label, v);
-        A.note(`${label}：完了`);
-      } else {
-        await loadLoopVideo(f, label, v);
+        const kind = webm ? 'loop' : 'dv';
+        const libId = await addToLib(f, v, kind);
+        placeNext = renderer.xr.isPresenting;     // VRの中で選んだときは、自分の正面に置く
+        try {
+          if (kind === 'dv') await load3DVideo(f, label, v, libId);
+          else await loadLoopVideo(f, label, v, libId);
+        } finally { placeNext = false; }
         A.note(`${label}：完了`);
       }
     } catch (err) {

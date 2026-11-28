@@ -10,6 +10,7 @@ const { PARAMS, settings, photos, scene, camera, renderer } = A;
 const PW = 1024, HEAD = 110, ROWH = 80;
 const panelRows = [
   ...PARAMS.map(p => ({ type: p.options ? 'cycle' : 'num', p })),
+  { type:'library' },
   { type:'cutall' },
   { type:'arrange' },
   { type:'clear' },
@@ -45,6 +46,9 @@ function rowButtons(r, i){
     { x0:660, x1:1000, y0, y1, text: A.allCut ? 'ON' : 'OFF', act:() => {
       A.allCut = !A.allCut; photos.forEach(m => A.setCut(m, A.allCut)); A.drawPanel();
     }},
+  ];
+  else if (r.type === 'library') list = [
+    { x0:660, x1:1000, y0, y1, text:'選ぶ・しまう', act:() => { if (A.openLibrary){ panel.visible = false; A.openLibrary(panel); } } },
   ];
   else if (r.type === 'arrange') list = [
     { x0:660, x1:1000, y0, y1, text:'取り囲む', act:() => { A.arrangeAround(); A.drawPanel(); } },
@@ -90,6 +94,7 @@ A.drawPanel = () => {
     g.textAlign = 'left'; g.fillStyle = '#eee'; g.font = '36px sans-serif';
     if (r.type === 'num' || r.type === 'cycle') g.fillText(r.p.label, 36, cy);
     if (r.type === 'cutall') g.fillText('切り抜き（全部）', 36, cy);
+    if (r.type === 'library') g.fillText('動画ライブラリ', 36, cy);
     if (r.type === 'arrange') g.fillText('並べ直す（人の大きさ）', 36, cy);
     if (r.type === 'clear') g.fillText(`写真（${photos.length} 枚）` + ((A.people || []).length ? `・人物 ${A.people.length}` : ''), 36, cy);
     if (r.type === 'num'){
@@ -110,6 +115,22 @@ A.drawPanel = () => {
 };
 
 const tmpP = new THREE.Vector3(), tmpDir = new THREE.Vector3();
+// パネルを自分の正面（少し下）に出す。ほかのパネル（動画ライブラリなど）も使う
+A.showPanelAt = (mesh, like) => {
+  if (like){                      // 別のパネルと同じ場所に出す
+    mesh.position.copy(like.position); mesh.quaternion.copy(like.quaternion); mesh.visible = true; return;
+  }
+  camera.getWorldPosition(tmpP);
+  camera.getWorldDirection(tmpDir);
+  tmpDir.y = 0;
+  if (tmpDir.lengthSq() < 1e-4) tmpDir.set(0, 0, -1);
+  tmpDir.normalize();
+  mesh.position.copy(tmpP).addScaledVector(tmpDir, 0.8);
+  mesh.position.y = tmpP.y - 0.15;
+  mesh.lookAt(tmpP.x, mesh.position.y, tmpP.z);
+  mesh.visible = true;
+};
+A.uiPanels = [];   // ほかのパネル：{ mesh, click(uv), hover(uv) → ボタンのid, draw(), close() }
 function togglePanel(){
   if (panel.visible){ panel.visible = false; return; }
   camera.getWorldPosition(tmpP);
@@ -186,9 +207,16 @@ const controllers = [0,1].map(i => {
 
   c.addEventListener('selectstart', () => {
     setRay(c);
-    if (panel.visible){
-      const ph = raycaster.intersectObject(panel, false)[0];
-      if (ph){ clickPanel(ph); buzz(c, 0.3, 30); return; }
+    const others = A.uiPanels.filter(p => p.mesh.visible);
+    const targets = [panel, ...others.map(p => p.mesh)].filter(o => o.visible);
+    if (targets.length){
+      const ph = raycaster.intersectObjects(targets, false)[0];
+      if (ph){
+        if (ph.object === panel) clickPanel(ph);
+        else others.find(p => p.mesh === ph.object).click(ph.uv);
+        buzz(c, 0.3, 30);
+        return;
+      }
     }
     const hit = raycaster.intersectObjects([...photos, ...(A.people || [])], false)[0];
     if (!hit) return;
@@ -231,24 +259,30 @@ const controllers = [0,1].map(i => {
 
 // パネルのどこを指しているかを毎フレーム調べて、変わったら描き直す
 function updatePanelHover(){
-  const ids = [];
+  const ids = [], extra = [];
+  const targets = [panel, ...A.uiPanels.map(p => p.mesh)].filter(o => o.visible);
   controllers.forEach((c, i) => {
     const dot = c.userData.dot;
     let hit = null;
-    if (panel.visible && renderer.xr.isPresenting && !c.userData.held){
+    if (targets.length && renderer.xr.isPresenting && !c.userData.held){
       setRay(c);
-      hit = raycaster.intersectObject(panel, false)[0] || null;
+      hit = raycaster.intersectObjects(targets, false)[0] || null;
     }
+    ids[i] = null; extra[i] = null;
     if (hit){
       dot.position.copy(hit.point);
       dot.visible = true;
       c.userData.line.scale.z = hit.distance;   // 光線をパネルで止める
-      const b = buttonAt(hit.uv);
-      ids[i] = b ? b.id : null;
+      if (hit.object === panel){
+        const b = buttonAt(hit.uv);
+        ids[i] = b ? b.id : null;
+      } else {
+        const p = A.uiPanels.find(p => p.mesh === hit.object);
+        extra[i] = { p, id: p.hover(hit.uv) };
+      }
     } else {
       dot.visible = false;
       c.userData.line.scale.z = 3;
-      ids[i] = null;
     }
   });
   if (ids[0] !== hoverIds[0] || ids[1] !== hoverIds[1]){
@@ -257,12 +291,24 @@ function updatePanelHover(){
     hoverIds = ids;
     A.drawPanel();
   }
+  for (const p of A.uiPanels){
+    const h = [0, 1].map(i => extra[i] && extra[i].p === p ? extra[i].id : null);
+    const prev = p.hoverIds || [null, null];
+    if (h[0] !== prev[0] || h[1] !== prev[1]){
+      controllers.forEach((c, i) => { if (h[i] && h[i] !== prev[i]) buzz(c, 0.15, 15); });
+      p.hoverIds = h;
+      p.draw();
+    }
+  }
 }
 
 // ===== 写真の削除 =====
 function disposePhoto(m){
   if (m.userData.splat){ A.disposePerson(m); return; }   // 立体人物（splat.js）
   m.parent && m.parent.remove(m);
+  // 動画なら再生を止めて手放す（止めないと、見えないまま読み続けて重くなる）
+  const v = m.userData.video;
+  if (v){ try { v.pause(); URL.revokeObjectURL(v.src); v.removeAttribute('src'); v.load(); } catch (e) {} m.userData.video = null; }
   const texs = new Set();
   for (const mat of [m.material, m.userData.back.material]){
     for (const k of ['map','maskMap','depthMap']) texs.add(mat.uniforms[k].value);
@@ -273,6 +319,11 @@ function disposePhoto(m){
   const i = photos.indexOf(m);
   if (i >= 0) photos.splice(i, 1);
 }
+A.disposePhoto = m => {
+  for (const o of controllers) if (o.userData.held === m){ o.userData.held = null; o.userData.lineMat.color.set(CYAN); }
+  if (A.twoHand && A.twoHand.obj === m) A.releaseAll();
+  disposePhoto(m);
+};
 A.releaseAll = () => {
   A.twoHand = null;
   for (const c of controllers){
@@ -351,6 +402,7 @@ renderer.setAnimationLoop((time, frame) => {
   for (const c of controllers){
     if (pressed(c, 3)){
       if (c.userData.held) deleteHeld(c);   // つかんでいれば その写真を削除
+      else if (A.uiPanels.some(p => p.mesh.visible)) A.uiPanels.forEach(p => p.close());   // ほかのパネルが出ていれば閉じる
       else togglePanel();                   // つかんでいなければ 調整パネル
     }
     if (pressed(c, 4) && c.userData.held){
