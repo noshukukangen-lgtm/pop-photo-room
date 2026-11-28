@@ -205,15 +205,17 @@ A.arrangeAround = (...args) => { if (!skipArrange) origArrange(...args); };
 const cPos = new THREE.Vector3(), cDir = new THREE.Vector3();
 function placeInFront(m){
   const L = m.userData.layout, inXR = renderer.xr.isPresenting;
+  const back = !inXR && A.vrReturnPose;      // VRを出て動画を選んでいる間は、出る直前に見ていた正面に置く
   A.camera.getWorldPosition(cPos);
   A.camera.getWorldDirection(cDir);
-  const eyeY = inXR ? cPos.y : 1.5;
-  if (!inXR){ cPos.set(0, 0, 0); cDir.set(0, 0, -1); }
+  if (back){ cPos.copy(back.pos); cDir.copy(back.dir); }
+  const eyeY = inXR || back ? cPos.y : 1.5;
+  if (!inXR && !back){ cPos.set(0, 0, 0); cDir.set(0, 0, -1); }
   cDir.y = 0;
   if (cDir.lengthSq() < 1e-4) cDir.set(0, 0, -1);
   cDir.normalize();
   m.scale.setScalar(L.s);
-  const y = (inXR && L.fullBody && A.floorY !== null) ? A.floorY - L.s * L.bottom : eyeY + 0.15 - L.s * L.top;
+  const y = ((inXR || back) && L.fullBody && A.floorY !== null) ? A.floorY - L.s * L.bottom : eyeY + 0.15 - L.s * L.top;
   m.position.set(cPos.x + cDir.x * 1.2, y, cPos.z + cDir.z * 1.2);
   m.lookAt(cPos.x, y, cPos.z);
   m.translateX(-L.s * L.cx);
@@ -543,7 +545,7 @@ $('videos').addEventListener('change', async e => {
         // WebMでないループ動画は、全部のコマで立体になる動画（〜_3d.mp4）
         const kind = webm ? 'loop' : 'dv';
         const libId = await addToLib(f, v, kind);
-        placeNext = renderer.xr.isPresenting;     // VRの中で選んだときは、自分の正面に置く
+        placeNext = renderer.xr.isPresenting || !!A.vrReturnPose;     // VRの中（からいったん出て）選んだときは、自分の正面に置く
         try {
           if (kind === 'dv') await load3DVideo(f, label, v, libId);
           else await loadLoopVideo(f, label, v, libId);
@@ -556,4 +558,5 @@ $('videos').addEventListener('change', async e => {
   }
   if (files.length && vrCount < files.length) status.textContent = `合計 ${photos.length} 枚 準備完了。START AR を押してください。`;
   e.target.value = '';
+  if (A.onVideosLoaded) A.onVideosLoaded(files.length);
 });
