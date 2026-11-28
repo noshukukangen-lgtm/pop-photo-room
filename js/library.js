@@ -53,11 +53,7 @@ function buttons(){
   const fy0 = FOOT_Y + 8, fy1 = FOOT_Y + FOOT_H - 8;
   list.push({ id: 'prev', x0: 24, x1: 164, y0: fy0, y1: fy1, text: '◀', act: () => { if (page > 0){ page--; draw(); } } });
   list.push({ id: 'next', x0: 178, x1: 318, y0: fy0, y1: fy1, text: '▶', act: () => { if (page < pages - 1){ page++; draw(); } } });
-  list.push({ id: 'file', x0: 332, x1: 716, y0: fy0, y1: fy1, text: 'ファイルから追加', act: () => {
-    msg = 'ファイルを選ぶ画面を開きます（出ないときは、VRを出てから選んでください）';
-    draw();
-    try { document.getElementById('videos').click(); } catch (e) {}
-  } });
+  list.push({ id: 'file', x0: 332, x1: 716, y0: fy0, y1: fy1, text: 'ファイルから追加', act: addFromVR });
   list.push({ id: 'close', x0: 730, x1: 1000, y0: fy0, y1: fy1, text: '閉じる', act: close });
   return list;
 }
@@ -190,3 +186,62 @@ setInterval(() => {
 
 // VRを出たらパネルは閉じる
 renderer.xr.addEventListener('sessionend', close);
+
+// =====================================================================
+// 「ファイルから追加」：VRの中ではファイルを選ぶ画面が出せないので、いったんVRを出て選び、ボタン1つでVRに戻る
+//   選んだ動画は、VRを出る直前に見ていた正面に置かれる
+// =====================================================================
+const ov = document.createElement('div');
+ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(8,10,16,0.97);display:none;' +
+  'flex-direction:column;align-items:center;justify-content:center;gap:28px;font-family:sans-serif;color:#fff';
+const bigBtn = (text, bg) => {
+  const b = document.createElement('button');
+  b.textContent = text;
+  b.style.cssText = `font-size:44px;padding:28px 64px;border:none;border-radius:24px;background:${bg};color:#fff;min-width:520px`;
+  return b;
+};
+const ovMsg = document.createElement('div');
+ovMsg.style.cssText = 'font-size:30px;line-height:1.6;text-align:center;max-width:90vw';
+const ovPick = bigBtn('動画を選ぶ', '#2d6cdf');
+const ovBack = bigBtn('VRに戻る', '#1f9d55');
+const ovCancel = bigBtn('やめる', '#444');
+ovCancel.style.fontSize = '30px'; ovCancel.style.padding = '18px 40px';
+ov.append(ovMsg, ovPick, ovBack, ovCancel);
+document.body.appendChild(ov);
+let ovLoading = false;
+function showOv(text){ ovMsg.textContent = text; ov.style.display = 'flex'; }
+function hideOv(){ ov.style.display = 'none'; A.vrReturnPose = null; ovLoading = false; }
+
+const rp = new THREE.Vector3(), rd = new THREE.Vector3();
+function addFromVR(){
+  // 今見ている正面を覚えておく（選んだ動画をそこに置くため）
+  A.camera.getWorldPosition(rp);
+  A.camera.getWorldDirection(rd);
+  rd.y = 0;
+  if (rd.lengthSq() < 1e-4) rd.set(0, 0, -1);
+  A.vrReturnPose = { pos: rp.clone(), dir: rd.normalize().clone() };
+  showOv('動画を選んでください。読み込みが終わったら「VRに戻る」を押すと、さっき見ていた正面に出ます。');
+  const s = renderer.xr.getSession();
+  const pick = () => { try { document.getElementById('videos').click(); } catch (e) {} };
+  if (s) s.end().then(pick, pick); else pick();   // 選ぶ画面がすぐ出ればそれを使う。出なければ「動画を選ぶ」を押す
+}
+ovPick.onclick = () => document.getElementById('videos').click();
+document.getElementById('videos').addEventListener('change', e => {
+  if (ov.style.display !== 'flex' || !(e.target.files || []).length) return;
+  ovLoading = true;
+  showOv(`${e.target.files.length} 本を読み込んでいます…（終わるまで少し待ってください）`);
+});
+A.onVideosLoaded = n => {
+  if (ov.style.display !== 'flex' || !ovLoading) return;
+  ovLoading = false;
+  showOv(`${n} 本を読み込みました。「VRに戻る」を押してください。続けて選ぶなら「動画を選ぶ」。`);
+};
+ovBack.onclick = () => {
+  const btn = document.getElementById('ARButton');
+  if (ovLoading){ showOv('まだ読み込み中です。終わってから押してください。'); return; }
+  ov.style.display = 'none';
+  if (btn) btn.click();
+};
+ovCancel.onclick = hideOv;
+// VRに戻ったら、覚えていた正面は使い終わり
+renderer.xr.addEventListener('sessionstart', () => { if (ov.style.display !== 'flex'){ A.vrReturnPose = null; ovLoading = false; } });
