@@ -244,15 +244,25 @@ A.buildPhotoMesh = d => {
     };
     if (d.libId) link();
   } else if (d.saved){
-    const libId = readMap()[d.saved.id] || d.saved.id;
-    vGet(libId).then(async rec => {
-      if (!rec || !photos.includes(m)) return;
-      const v = await makeVideo(rec.video);
-      m.userData.libId = libId;
-      if (rec.dv) use3D(m, v); else useVideo(m, v);
-    }).catch(() => {});
+    attachSaved(m, d.saved.id);
   }
 };
+
+// 保存してあった写真に動画があれば、動画に差し替える
+async function attachSaved(m, pid){
+  if (m.userData.video || m.userData.vidLoading) return;
+  m.userData.vidLoading = true;
+  try {
+    const libId = readMap()[pid] || pid;
+    const rec = await vGet(libId);
+    if (!rec || !photos.includes(m) || m.userData.video) return;
+    const v = await makeVideo(rec.video);
+    m.userData.libId = libId;
+    if (rec.dv) use3D(m, v); else useVideo(m, v);
+  } catch (e) {} finally { m.userData.vidLoading = false; }
+}
+// この部品より先に復元が済んだ写真（ページを開いてすぐ復元が始まるため）も、動画に差し替える
+photos.forEach(m => { if (m.userData.id) attachSaved(m, m.userData.id); });
 
 // ---------- 動画ライブラリ ----------
 // 小さな見本の絵（ライブラリのパネルに出す）。sw×sh の範囲を切り取る
