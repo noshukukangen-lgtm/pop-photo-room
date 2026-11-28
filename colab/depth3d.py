@@ -11,7 +11,6 @@ from PIL import Image
 import loop_tool as lt
 
 MAX_LONG = 1920          # 長い辺の上限（Questで滑らかに再生できる大きさ）
-LOOP_PIX = 1920 * 1080 * 24 * 15   # ループを全部メモリに載せるときの上限（フルHDで15秒ぶん）
 FPS_MAX = 30             # コマ数の上限
 _depth = None
 
@@ -122,20 +121,31 @@ def _ema(prev, x, k=0.35):
 
 
 def encode_3d(frames, alpha, out, fps, log=print, loop=True):
-    """短い動画（全部のコマがメモリにあるもの）を 〜_3d.mp4 にする。ループなら前後からならしてつなぎ目もなめらかに"""
+    """短い動画（全部のコマがメモリにあるもの）を 〜_3d.mp4 にする。ループなら前後からならしてつなぎ目もなめらかに
+       長いループでも画面を小さくしないで済むよう、奥行きは8コマずつ作って、すぐ型紙の大きさに縮めて持つ"""
+    import cv2
     n, h, w = frames.shape[:3]
     h, w = h - h % 4, w - w % 6
     frames, alpha = frames[:, :h, :w], alpha[:, :h, :w]
-    log(f'全部のコマ（{n} コマ）の奥行きを作っています…')
-    raw = depth_raw(np.ascontiguousarray(frames))
+    dw, qh, bq = w - w * 2 // 3, (h // 2) // 2, h // 2 - (h // 2) // 2
     sh = Shaper(h)
-    if loop:                                    # 最初のそろえ方を、全体の平均から始める
-        sh.lo = float(np.mean([np.percentile(r, 2) for r in raw[::max(1, n // 8)]]))
-        sh.hi = float(np.mean([np.percentile(r, 98) for r in raw[::max(1, n // 8)]]))
-    D = np.empty_like(raw)
-    Bs = np.empty_like(raw)
-    for i in range(n):
-        D[i], Bs[i] = sh(raw[i], alpha[i])
+    if loop:                                    # 最初のそろえ方を、全体の平均から始める（数コマだけ先に見る）
+        idx = list(range(0, n, max(1, n // 8)))
+        smp = depth_raw(np.ascontiguousarray(frames[idx]))
+        sh.lo = float(np.mean([np.percentile(r, 2) for r in smp]))
+        sh.hi = float(np.mean([np.percentile(r, 98) for r in smp]))
+        del smp
+    log(f'全部のコマ（{n} コマ）の奥行きを作っています…')
+    D = np.empty((n, qh, dw), np.float32)
+    Bs = np.empty((n, bq, dw), np.float32)
+    for i in range(0, n, 8):
+        raw = depth_raw(np.ascontiguousarray(frames[i:i + 8]))
+        for j, r in enumerate(raw):
+            d, bb = sh(r, alpha[i + j])
+            D[i + j] = cv2.resize(d, (dw, qh), interpolation=cv2.INTER_AREA)
+            Bs[i + j] = cv2.resize(bb, (dw, bq), interpolation=cv2.INTER_AREA)
+        if (i // 8) % 30 == 29:
+            log(f'  {i + 8} / {n} コマ')
     # コマ同士の揺れを抑える（前から・後ろからの平均なので動きは遅れない）
     def smooth(x):
         def run(seq):
@@ -242,16 +252,11 @@ def make_loop_3d(path, t, log, box):
     s, L, d = lt.find_loop(path, t, dur)
     log(f'{lt.fmt(s)} から {L:.1f} 秒を使います（つなぎ目の差 {d:.1f}、小さいほどなめらか）')
     w, h = _size(path, s)
-    # 長いループは全部のコマをメモリに載せるので、多すぎるときだけ少し小さくする（Colabのメモリがあふれないように）
-    px = L * lt.FPS * w * h
-    if px > LOOP_PIX:
-        k = (LOOP_PIX / px) ** 0.5
-        w = max(6, int(w * k) // 6 * 6)
-        log(f'長いループなので、{w} 幅に少し小さくして作ります')
     frames = lt.read_frames(path, s, L, w, lt.FPS)
     log(f'人物を切り抜いています…（{len(frames)} コマ）')
     a = lt.matte(frames)
     rgb, a = lt.loop_blend(frames, a)
+    del frames
     stem = os.path.splitext(os.path.basename(path))[0].split('@')[0]
     out = os.path.join(lt.OUT_DIR, f'{stem}_{lt.fmt(s).replace(":", "-")}_loop_3d.mp4')
     encode_3d(rgb, a, out, lt.FPS, log, loop=True)
