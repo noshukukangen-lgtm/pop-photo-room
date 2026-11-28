@@ -80,7 +80,8 @@ function draw(){
     g.font = '28px sans-serif';
     g.fillText('下の「ファイルから追加」か、VRを出た画面で動画を選んでください', PW / 2, HEAD + 280);
   }
-  for (const b of bs){
+  // タイルを先に描いて、その上に × を描く
+  for (const b of [...bs.filter(b => b.tile), ...bs.filter(b => !b.tile)]){
     const hot = hov.includes(b.id);
     if (b.tile){
       const it = b.it, on = placed.has(it.id);
@@ -120,7 +121,7 @@ function draw(){
     g.fillText(b.text, (b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2 + 2);
   }
   g.textAlign = 'center'; g.font = '26px sans-serif'; g.fillStyle = msg ? '#fc8' : '#89a';
-  g.fillText(msg || '押すと正面に出す／もう一度押すとしまう（ライブラリには残る）・×を2回でライブラリから消す',
+  g.fillText(msg || '押すと正面に出す／もう一度でしまう・× を2回でライブラリから消す',
              PW / 2, FOOT_Y + FOOT_H + 34);
   tex.needsUpdate = true;
 }
